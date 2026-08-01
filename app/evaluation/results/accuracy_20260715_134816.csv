@@ -1,0 +1,33 @@
+id,case_type,input,expected,detected,match_type,confidence,correct,false_positive,missed,direct_ref_ms,semantic_ms,db_lookup_ms,asr_ms,total_ms
+direct-1,direct,John 3:16,John 3:16,John 3:16,direct,0.97,True,False,False,7.34,0.0,530.55,,537.91
+direct-2,direct,John chapter 3 verse 16,John 3:16,John 3:16,direct,0.97,True,False,False,0.83,0.0,56.76,,57.6
+direct-3,direct,Mark 1 2,Mark 1:2,Mark 1:2,direct,0.97,True,False,False,0.85,0.0,74.85,,75.73
+direct-4,direct,Mark 12,Mark 12:1,Mark 12:1,direct,0.97,True,False,False,0.32,0.0,65.05,,65.38
+direct-5,direct,Matthew 6.33,Matthew 6:33,Matthew 6:33,direct,0.97,True,False,False,0.39,0.0,92.7,,93.11
+direct-6,direct,Matthew 5 verse 10,Matthew 5:10,Matthew 5:10,direct,0.97,True,False,False,0.86,0.0,76.95,,77.84
+direct-7,direct,Romans eight twenty eight,Romans 8:28,Romans 8:28,direct,0.97,True,False,False,0.48,0.0,70.49,,70.98
+direct-8,direct,First Corinthians 13:4,1 Corinthians 13:4,1 Corinthians 13:4,direct,0.97,True,False,False,0.53,0.0,130.45,,130.99
+direct-9,direct,Ps 23:1,Psalms 23:1,Psalms 23:1,direct,0.97,True,False,False,0.36,0.0,64.72,,65.09
+direct-10,direct,Revelations 3:20,Revelation 3:20,Revelation 3:20,direct,0.97,True,False,False,0.47,0.0,61.72,,62.21
+semantic-1,semantic,for god so loved the world,John 3:16,John 3:16,semantic,1.0,True,False,False,1.47,257.79,62.42,,321.71
+semantic-2,semantic,I am the way the truth and the life,John 14:6,John 14:6,semantic,1.0,True,False,False,1.63,268.06,53.9,,323.62
+semantic-3,semantic,the lord is my shepherd,Psalms 23:1,Psalms 23:1,semantic,1.0,True,False,False,1.06,130.5,54.32,,185.89
+semantic-4,semantic,I can do all things through christ,Philippians 4:13,Philippians 4:13,semantic,1.0,True,False,False,1.4,291.32,61.73,,354.46
+semantic-5,semantic,all things work together for good,Romans 8:28,Romans 8:28,semantic,1.0,True,False,False,1.43,170.03,22.74,,194.21
+semantic-6,semantic,trust in the lord with all your heart,Proverbs 3:5,Proverbs 3:5,semantic,1.0,True,False,False,0.54,56.26,21.66,,78.47
+semantic-7,semantic,the prodigal son,Luke 15:11,Luke 15:11,semantic,1.0,True,False,False,0.25,80.22,22.28,,102.75
+semantic-8,semantic,david and goliath,1 Samuel 17:1,1 Samuel 17:1,semantic,1.0,True,False,False,0.29,26.33,22.01,,48.64
+semantic-9,semantic,be strong and do not be afraid for god is with you,Deuteronomy 31:6,Deuteronomy 31:6,semantic,0.542,True,False,False,0.71,37.62,37.79,,76.13
+semantic-10,semantic,god will supply everything you need,Philippians 4:19,Philippians 4:19,semantic,0.549,True,False,False,1.16,19.4,40.25,,60.82
+semantic-11,semantic,if you have faith you can move a mountain,Matthew 17:20,Matthew 17:20,semantic,1.0,True,False,False,1.16,130.55,34.38,,166.09
+semantic-12,semantic,nothing can separate us from the love of god,Romans 8:35,Romans 8:35,semantic,1.0,True,False,False,0.65,104.13,22.3,,127.09
+semantic-13,semantic,"So when Paul was talking about the law of God, he said I see then another law",Romans 7:23,Romans 7:23,semantic,0.506,True,False,False,0.99,26.44,22.64,,50.08
+nomatch-1,no_match_expected,good morning everyone how are you today,:,(no match),,,False,False,False,0.45,15.03,0.0,,15.49
+nomatch-2,no_match_expected,can you hear me at the back,:,(no match),,,False,False,False,0.9,20.13,0.0,,21.04
+nomatch-3,no_match_expected,lets all stand and worship together,:,(no match),,,False,False,False,0.91,18.52,0.0,,19.44
+nomatch-4,no_match_expected,thank you pastor for that word,:,(no match),,,False,False,False,0.76,17.77,0.0,,18.53
+nomatch-5,no_match_expected,lets pray before we continue,:,(no match),,,False,False,False,0.66,14.47,0.0,,15.13
+nomatch-6,no_match_expected,god is good all the time,:,(no match),,,False,False,False,0.39,12.31,0.0,,12.71
+nomatch-7,no_match_expected,we need to have faith in god,:,Mark 11:22,semantic,0.56,False,True,False,0.44,12.73,24.4,,37.58
+nomatch-8,no_match_expected,i believe god is with us today,:,(no match),,,False,False,False,0.46,20.27,0.0,,20.73
+nomatch-9,no_match_expected,god loves each and every one of us,:,1 John 4:7,semantic,0.545,False,True,False,1.13,17.95,38.76,,57.87

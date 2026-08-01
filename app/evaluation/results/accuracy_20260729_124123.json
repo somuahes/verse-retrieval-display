@@ -1,0 +1,19 @@
+[
+  {
+    "id": "smoke-1",
+    "case_type": "direct",
+    "input": "Turn with me to Romans chapter 5 verse 15.",
+    "expected": "Romans 5:15",
+    "detected": "Romans 5:15",
+    "match_type": "direct",
+    "confidence": 0.97,
+    "correct": true,
+    "false_positive": false,
+    "missed": false,
+    "direct_ref_ms": 7.84,
+    "semantic_ms": 0.0,
+    "db_lookup_ms": 481.41,
+    "asr_ms": 1024.45,
+    "total_ms": 489.26
+  }
+]

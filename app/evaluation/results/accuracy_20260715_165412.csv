@@ -1,0 +1,32 @@
+id,case_type,input,expected,detected,match_type,confidence,correct,false_positive,missed,direct_ref_ms,semantic_ms,db_lookup_ms,asr_ms,total_ms
+gen-1,semantic,the fruit of the spirit is love joy peace,Galatians 5:22,Galatians 5:22,semantic,0.736,True,False,False,9.33,39.47,30.01,,78.81
+gen-2,semantic,greater love hath no man than this that a man lay down his life for his friends,John 15:13,John 15:13,semantic,0.824,True,False,False,1.15,21.24,24.49,,46.88
+gen-3,semantic,man shall not live by bread alone,Matthew 4:4,Matthew 4:4,semantic,0.825,True,False,False,0.91,14.92,25.18,,41.03
+gen-4,semantic,the truth shall make you free,John 8:32,John 8:32,semantic,0.805,True,False,False,0.91,16.48,27.12,,44.52
+gen-5,semantic,many are called but few are chosen,Matthew 22:13,Matthew 22:13,semantic,0.789,True,False,False,0.53,17.77,24.62,,42.93
+gen-6,semantic,pride goes before a fall,Proverbs 16:18,Proverbs 16:18,semantic,0.569,True,False,False,0.38,18.06,36.29,,54.74
+gen-7,semantic,money is the root of all evil,1 Timothy 6:10,1 Timothy 6:10,semantic,0.77,True,False,False,0.52,14.71,26.61,,41.85
+gen-8,semantic,spare the rod spoil the child,Proverbs 13:24,(no match),,,False,False,True,0.46,16.44,0.0,,16.91
+gen-9,semantic,a house divided against itself cannot stand,Matthew 12:25,Mark 3:25,semantic,0.753,False,False,False,0.54,14.31,23.8,,38.65
+gen-10,semantic,an eye for an eye and a tooth for a tooth,Exodus 21:24,Matthew 5:38,semantic,0.798,False,False,False,0.89,19.28,35.6,,55.77
+gen-11,semantic,and God said let there be light,Genesis 1:3,Genesis 1:3,semantic,0.864,True,False,False,0.99,16.01,23.5,,40.51
+gen-12,semantic,the lord gives and the lord takes away,Job 1:21,(no match),,,False,False,True,0.57,15.13,0.0,,15.71
+gen-13,semantic,cast your bread upon the waters,Ecclesiastes 11:1,Ecclesiastes 11:1,semantic,0.618,True,False,False,0.49,17.34,25.83,,43.67
+gen-14,semantic,a soft answer turns away wrath,Proverbs 15:1,Proverbs 15:1,semantic,0.57,True,False,False,0.47,16.45,35.64,,52.57
+gen-15,semantic,iron sharpens iron,Proverbs 27:17,(no match),,,False,False,True,0.28,13.12,0.0,,13.4
+gen-16,semantic,be angry and sin not,Ephesians 4:26,(no match),,,False,False,True,0.39,0.42,0.0,,0.81
+gen-17,semantic,let your light so shine before men,Matthew 5:16,Matthew 5:16,semantic,0.749,True,False,False,0.49,13.05,26.66,,40.2
+gen-18,semantic,no man can serve two masters,Matthew 6:24,Matthew 6:24,semantic,0.78,True,False,False,0.48,13.25,23.78,,37.51
+gen-19,semantic,physician heal thyself,Luke 4:23,Luke 4:23,semantic,0.631,True,False,False,0.27,14.18,23.68,,38.14
+gen-20,semantic,can a leopard change its spots,Jeremiah 13:23,(no match),,,False,False,True,0.43,18.24,0.0,,18.68
+gen-21,semantic,the spirit is willing but the flesh is weak,Matthew 26:40,Matthew 26:40,semantic,0.663,True,False,False,0.64,14.41,23.05,,38.11
+gen-22,semantic,let him that is without sin cast the first stone,John 8:7,John 8:7,semantic,0.669,True,False,False,0.73,13.3,24.8,,38.84
+gen-23,semantic,consider the lilies of the field how they grow,Matthew 6:28,Matthew 6:28,semantic,0.725,True,False,False,0.66,21.73,22.85,,45.25
+gen-24,semantic,in my fathers house are many mansions,John 14:2,John 14:2,semantic,0.57,True,False,False,0.49,17.03,40.42,,57.95
+gen-25,semantic,vengeance is mine i will repay saith the lord,Romans 12:19,Romans 12:19,semantic,0.67,True,False,False,0.66,17.62,23.92,,42.21
+gen-26,semantic,do not cast your pearls before swine,Matthew 7:6,Matthew 7:6,semantic,0.688,True,False,False,0.51,14.07,22.87,,37.45
+gen-27,semantic,ye are the salt of the earth,Matthew 5:13,Matthew 5:13,semantic,0.717,True,False,False,0.49,12.63,24.23,,37.36
+gen-28,semantic,eat drink and be merry,Luke 12:19,(no match),,,False,False,True,0.38,16.36,0.0,,16.74
+gen-29,semantic,to every thing there is a season,Ecclesiastes 3:1,Ecclesiastes 3:1,semantic,0.709,True,False,False,0.96,17.45,24.26,,42.68
+gen-30,semantic,be still and know that i am God,Psalms 46:10,Psalms 46:10,semantic,0.655,True,False,False,0.54,15.52,40.79,,56.86
+gen-31,semantic,the lord is my light and my salvation whom shall i fear,Psalms 27:1,Psalms 27:1,semantic,0.821,True,False,False,1.42,15.27,23.0,,39.7

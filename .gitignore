@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments — regenerate via:
+#   python -m venv venv311
+#   venv311\Scripts\activate
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r requirements.txt
+venv311/
+venv/
+
+# Regenerated locally from data/*.json via app.database.db.build_database()
+# -- do not commit, do not hand-edit.
+app/database/bible.db
+app/database/feedback.db
+
+# Model weights (faster-whisper, sentence-transformer) and locally-built
+# FAISS/lexical caches -- large binaries, several individual files exceed
+# GitHub's 100MB per-file limit. Not regenerable via a simple pip install;
+# see TRANSCRIPTION_SETUP.md's "First-time model setup" section for the
+# exact download/conversion steps needed after cloning.
+models/
+
+# Runtime logs
+*.log
+bible_ai.log
+
+# OS/editor cruft
+.DS_Store
+Thumbs.db
+
+# Claude Code's own local tool state, not project content
+.claude/

@@ -1,0 +1,59 @@
+# ============================================================
+#  Bible AI Project — Python Dependencies
+#  Tested on Python 3.10 / 3.11, Windows 10/11, CPU-only
+# ============================================================
+
+# --- Core ASR ---
+faster-whisper>=1.0.0       # Drop-in whisper replacement; 2-4x faster on CPU
+groq>=0.11.0                # Optional: cloud Whisper fallback (transcriber.py's
+                            # backend="auto"/"cloud") for machines with no usable
+                            # GPU. Not needed if you'll only ever run local/CPU.
+
+# --- Audio I/O ---
+sounddevice>=0.4.6          # Cross-platform microphone input
+soundfile>=0.12.1           # WAV/FLAC/OGG file loading
+scipy>=1.11.0               # Audio resampling (resample_poly)
+
+# --- Numerics (faster-whisper pulls these in, pinned for safety) ---
+numpy>=1.24.0
+
+# --- Database ---
+# sqlite3 is in the Python standard library — no extra install needed
+
+# --- NLP / Retrieval ---
+sentence-transformers>=2.6.0   # Semantic Bible verse retrieval
+torch>=2.0.0                   # Required by sentence-transformers
+                                # CPU-only wheel is fine; see install notes below
+
+# --- Web Interface (if used) ---
+flask>=3.0.0
+
+# --- Utilities ---
+beautifulsoup4>=4.12.0         # HTML parsing (existing project dependency)
+
+# ============================================================
+#  INSTALL NOTES
+# ============================================================
+#
+#  1. Create and activate a virtual environment:
+#       python -m venv venv
+#       venv\Scripts\activate          (Windows)
+#
+#  2. Install CPU-only PyTorch first (avoids downloading CUDA libs):
+#       pip install torch --index-url https://download.pytorch.org/whl/cpu
+#
+#  3. Install the rest:
+#       pip install -r requirements.txt
+#
+#  4. First run will download the Whisper model automatically
+#     (stored in %USERPROFILE%\.cache\huggingface on Windows).
+#     Model sizes and approximate sizes on disk:
+#       tiny   ~75 MB   — very fast, lower accuracy
+#       base   ~145 MB  — fast, moderate accuracy
+#       small  ~460 MB  — RECOMMENDED default (good balance)
+#       medium ~1.5 GB  — best accuracy, slower on CPU
+#
+#  REMOVED from original requirements.txt:
+#    openai-whisper  — replaced by faster-whisper (same models, faster)
+#    pyaudio         — replaced by sounddevice (easier to install on Windows,
+#                      no PortAudio DLL headache)

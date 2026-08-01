@@ -1,0 +1,33 @@
+id,case_type,input,expected,detected,match_type,confidence,correct,false_positive,missed,direct_ref_ms,semantic_ms,db_lookup_ms,asr_ms,total_ms
+direct-1,direct,John 3:16,John 3:16,John 3:16,direct,0.97,True,False,False,9.28,0.0,24.46,,33.75
+direct-2,direct,John chapter 3 verse 16,John 3:16,John 3:16,direct,0.97,True,False,False,0.23,0.0,23.41,,23.65
+direct-3,direct,Mark 1 2,Mark 1:2,Mark 1:2,direct,0.97,True,False,False,0.17,0.0,23.94,,24.11
+direct-4,direct,Mark 12,Mark 12:1,Mark 12:1,direct,0.97,True,False,False,0.17,0.0,23.41,,23.58
+direct-5,direct,Matthew 6.33,Matthew 6:33,Matthew 6:33,direct,0.97,True,False,False,0.18,0.0,23.9,,24.09
+direct-6,direct,Matthew 5 verse 10,Matthew 5:10,Matthew 5:10,direct,0.97,True,False,False,0.19,0.0,22.64,,22.84
+direct-7,direct,Romans eight twenty eight,Romans 8:28,Romans 8:28,direct,0.97,True,False,False,0.2,0.0,23.04,,23.25
+direct-8,direct,First Corinthians 13:4,1 Corinthians 13:4,1 Corinthians 13:4,direct,0.97,True,False,False,0.16,0.0,22.3,,22.46
+direct-9,direct,Ps 23:1,Psalms 23:1,Psalms 23:1,direct,0.97,True,False,False,0.15,0.0,22.32,,22.48
+direct-10,direct,Revelations 3:20,Revelation 3:20,Revelation 3:20,direct,0.97,True,False,False,0.19,0.0,22.38,,22.58
+semantic-1,semantic,for god so loved the world,John 3:16,John 3:16,semantic,1.0,True,False,False,0.43,89.66,23.31,,113.41
+semantic-2,semantic,I am the way the truth and the life,John 14:6,John 14:6,semantic,1.0,True,False,False,0.62,87.38,21.31,,109.33
+semantic-3,semantic,the lord is my shepherd,Psalms 23:1,Psalms 23:1,semantic,1.0,True,False,False,0.4,44.6,20.28,,65.3
+semantic-4,semantic,I can do all things through christ,Philippians 4:13,Philippians 4:13,semantic,1.0,True,False,False,0.47,90.76,20.34,,111.57
+semantic-5,semantic,all things work together for good,Romans 8:28,Romans 8:28,semantic,1.0,True,False,False,0.4,84.1,19.92,,104.43
+semantic-6,semantic,trust in the lord with all your heart,Proverbs 3:5,Proverbs 3:5,semantic,1.0,True,False,False,0.5,49.62,20.9,,71.03
+semantic-7,semantic,the prodigal son,Luke 15:11,Luke 15:11,semantic,1.0,True,False,False,0.26,82.75,25.2,,108.22
+semantic-8,semantic,david and goliath,1 Samuel 17:1,1 Samuel 17:1,semantic,1.0,True,False,False,0.28,39.33,30.14,,69.76
+semantic-9,semantic,be strong and do not be afraid for god is with you,Deuteronomy 31:6,Deuteronomy 31:6,semantic,0.542,True,False,False,0.86,40.01,24.1,,64.98
+semantic-10,semantic,god will supply everything you need,Philippians 4:19,Philippians 4:19,semantic,0.549,True,False,False,0.45,30.7,23.91,,55.07
+semantic-11,semantic,if you have faith you can move a mountain,Matthew 17:20,Matthew 17:20,semantic,1.0,True,False,False,0.64,94.71,35.05,,130.41
+semantic-12,semantic,nothing can separate us from the love of god,Romans 8:35,Romans 8:35,semantic,1.0,True,False,False,0.63,98.99,20.93,,120.55
+semantic-13,semantic,"So when Paul was talking about the law of God, he said I see then another law",Romans 7:23,Romans 7:23,semantic,0.506,True,False,False,1.02,295.89,32.51,,329.43
+nomatch-1,no_match_expected,good morning everyone how are you today,:,(no match),,,False,False,False,0.52,19.36,0.0,,19.88
+nomatch-2,no_match_expected,can you hear me at the back,:,(no match),,,False,False,False,0.5,13.49,0.0,,13.98
+nomatch-3,no_match_expected,lets all stand and worship together,:,(no match),,,False,False,False,0.55,18.74,0.0,,19.29
+nomatch-4,no_match_expected,thank you pastor for that word,:,(no match),,,False,False,False,0.46,17.23,0.0,,17.69
+nomatch-5,no_match_expected,lets pray before we continue,:,(no match),,,False,False,False,0.41,16.64,0.0,,17.05
+nomatch-6,no_match_expected,god is good all the time,:,(no match),,,False,False,False,0.46,14.21,0.0,,14.67
+nomatch-7,no_match_expected,we need to have faith in god,:,Mark 11:22,semantic,0.56,False,True,False,0.56,12.7,24.75,,38.02
+nomatch-8,no_match_expected,i believe god is with us today,:,(no match),,,False,False,False,0.98,24.7,0.0,,25.69
+nomatch-9,no_match_expected,god loves each and every one of us,:,1 John 4:7,semantic,0.545,False,True,False,0.56,15.29,39.16,,55.01

@@ -1,0 +1,19 @@
+{
+  "name": "High Contrast",
+  "font_family": "Arial",
+  "font_weight": "bold",
+  "font_size": 56,
+  "text_color": "#FFFF00",
+  "text_align": "center",
+  "ref_font_family": "Arial",
+  "ref_font_size": 26,
+  "ref_color": "#FFFFFF",
+  "reference_position": "above",
+  "background_type": "solid",
+  "background_color": "#000000",
+  "background_image_path": "",
+  "background_fit": "cover",
+  "content_area_pct": 85,
+  "padding": 50,
+  "element_spacing": 24
+}

@@ -1,0 +1,19 @@
+{
+  "name": "Modern Minimal",
+  "font_family": "Segoe UI",
+  "font_weight": "normal",
+  "font_size": 48,
+  "text_color": "#FFFFFF",
+  "text_align": "center",
+  "ref_font_family": "Segoe UI",
+  "ref_font_size": 22,
+  "ref_color": "#8A8FA8",
+  "reference_position": "below",
+  "background_type": "solid",
+  "background_color": "#0D0F14",
+  "background_image_path": "",
+  "background_fit": "cover",
+  "content_area_pct": 70,
+  "padding": 70,
+  "element_spacing": 22
+}

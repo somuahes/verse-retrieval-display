@@ -1,0 +1,33 @@
+id,input_type,input,case_type,expected_book,expected_chapter,expected_verse,notes
+direct-1,text,John 3:16,direct,John,3,16,From reference_extractor.py's own test suite
+direct-2,text,John chapter 3 verse 16,direct,John,3,16,Spoken-out reference form
+direct-3,text,Mark 1 2,direct,Mark,1,2,No punctuation form
+direct-4,text,Mark 12,direct,Mark,12,1,Book+chapter only defaults to verse 1
+direct-5,text,Matthew 6.33,direct,Matthew,6,33,Period as separator
+direct-6,text,Matthew 5 verse 10,direct,Matthew,5,10,Must not be caught by verse-jump path
+direct-7,text,Romans eight twenty eight,direct,Romans,8,28,Spoken number words
+direct-8,text,First Corinthians 13:4,direct,1 Corinthians,13,4,Ordinal book name
+direct-9,text,Ps 23:1,direct,Psalms,23,1,Book abbreviation
+direct-10,text,Revelations 3:20,direct,Revelation,3,20,Common Whisper mishearing normalisation
+semantic-1,text,for god so loved the world,semantic,John,3,16,Phrase map - famous quote
+semantic-2,text,I am the way the truth and the life,semantic,John,14,6,Phrase map
+semantic-3,text,the lord is my shepherd,semantic,Psalms,23,1,Phrase map
+semantic-4,text,I can do all things through christ,semantic,Philippians,4,13,Phrase map
+semantic-5,text,all things work together for good,semantic,Romans,8,28,Phrase map
+semantic-6,text,trust in the lord with all your heart,semantic,Proverbs,3,5,Phrase map
+semantic-7,text,the prodigal son,semantic,Luke,15,11,Event map
+semantic-8,text,david and goliath,semantic,1 Samuel,17,1,Event map
+semantic-9,text,be strong and do not be afraid for god is with you,semantic,Deuteronomy,31,6,Genuine paraphrase - validated final_score=0.630
+semantic-10,text,god will supply everything you need,semantic,Philippians,4,19,Genuine paraphrase - validated final_score=0.625
+semantic-11,text,if you have faith you can move a mountain,semantic,Matthew,17,20,Genuine paraphrase - validated final_score=0.544
+semantic-12,text,nothing can separate us from the love of god,semantic,Romans,8,35,"Known recall miss - final_score=0.529 is below the 0.53 threshold, so this is expected to be reported as a miss, not a bug"
+semantic-13,text,"So when Paul was talking about the law of God, he said I see then another law",semantic,Romans,7,23,"Preacher framing clause (Paul/God/law) shares more words with Acts 23:3 than the actual quote does - was misfiring to Acts 23:3 before the idf + phrase-bonus reweighting in semantic.py"
+nomatch-1,text,good morning everyone how are you today,no_match_expected,,,,Validated true negative
+nomatch-2,text,can you hear me at the back,no_match_expected,,,,Validated true negative
+nomatch-3,text,lets all stand and worship together,no_match_expected,,,,Validated true negative
+nomatch-4,text,thank you pastor for that word,no_match_expected,,,,Validated true negative
+nomatch-5,text,lets pray before we continue,no_match_expected,,,,Validated true negative
+nomatch-6,text,god is good all the time,no_match_expected,,,,Validated true negative
+nomatch-7,text,we need to have faith in god,no_match_expected,,,,"KNOWN false positive - currently misfires to Mark 11:22 at confidence 0.594, found during this session's threshold investigation"
+nomatch-8,text,i believe god is with us today,no_match_expected,,,,"KNOWN false positive - currently misfires to Acts 27:25 via lexical fallback"
+nomatch-9,text,god loves each and every one of us,no_match_expected,,,,"Borderline false positive - misfires to 1 John 4:7 at confidence 0.582"

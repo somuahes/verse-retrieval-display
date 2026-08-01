@@ -1,0 +1,19 @@
+{
+  "name": "Classic Gold",
+  "font_family": "Georgia",
+  "font_weight": "normal",
+  "font_size": 52,
+  "text_color": "#F0EBE0",
+  "text_align": "center",
+  "ref_font_family": "Georgia",
+  "ref_font_size": 28,
+  "ref_color": "#D4AF37",
+  "reference_position": "below",
+  "background_type": "solid",
+  "background_color": "#000000",
+  "background_image_path": "",
+  "background_fit": "cover",
+  "content_area_pct": 80,
+  "padding": 60,
+  "element_spacing": 28
+}

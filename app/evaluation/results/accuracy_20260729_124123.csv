@@ -1,0 +1,2 @@
+id,case_type,input,expected,detected,match_type,confidence,correct,false_positive,missed,direct_ref_ms,semantic_ms,db_lookup_ms,asr_ms,total_ms
+smoke-1,direct,Turn with me to Romans chapter 5 verse 15.,Romans 5:15,Romans 5:15,direct,0.97,True,False,False,7.84,0.0,481.41,1024.45,489.26

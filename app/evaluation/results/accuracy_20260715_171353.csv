@@ -1,0 +1,56 @@
+id,case_type,input,expected,detected,match_type,confidence,correct,false_positive,missed,direct_ref_ms,semantic_ms,db_lookup_ms,asr_ms,total_ms
+stress-0,semantic,"In John chapter 2, when Jesus went for the wedding in Canaan in Galilee.",John 2:1,John 2:1,direct,0.97,True,False,False,42.1,0.0,742.12,,784.23
+stress-1,semantic,he purified the heavenly things,Hebrews 9:23,Hebrews 9:23,semantic,0.691,True,False,False,0.44,54.81,69.36,,124.63
+stress-2,semantic,let the weak say i am strong,Joel 3:10,Joel 3:10,semantic,1.0,True,False,False,2.37,248.88,56.16,,307.43
+stress-3,semantic,might become the righteousness of God in Him,2 Corinthians 5:21,2 Corinthians 5:21,semantic,1.0,True,False,False,2.47,281.77,61.08,,345.34
+stress-4,semantic,the power of God unto salvation,Romans 1:16,Romans 1:16,semantic,0.683,True,False,False,1.08,34.4,61.58,,97.08
+stress-5,semantic,gave a kiss on His neck,Luke 15:20,(no match),,,False,False,True,1.39,28.28,0.0,,29.68
+stress-6,semantic,let him kiss me with the Kisses of His mouth,Song of Solomon 1:2,Song of Solomon 1:2,semantic,1.0,True,False,False,1.66,214.39,54.75,,270.82
+stress-7,semantic,Gods goodness leads us to repentance,Romans 2:4,Romans 2:4,semantic,1.0,True,False,False,1.07,261.38,57.83,,320.3
+stress-8,semantic,in whom we have redemption even the forgiveness of sins,Ephesians 1:7,Colossians 1:14,semantic,0.676,False,False,False,1.66,37.23,59.06,,97.97
+stress-9,semantic,being justified by faith we have peace with God,Romans 5:1,Romans 5:1,semantic,0.838,True,False,False,2.38,32.91,50.09,,85.4
+stress-10,semantic,who can lay a charge against Gods elect,Romans 8:33,Romans 8:33,semantic,0.605,True,False,False,1.45,24.39,47.13,,72.98
+stress-11,semantic,In him was no sin,1 John 3:5,1 John 3:5,semantic,0.69,True,False,False,0.87,39.12,44.77,,84.77
+stress-12,semantic,he knew no sin,2 Corinthians 5:21,2 Corinthians 5:21,semantic,0.724,True,False,False,0.62,23.27,61.02,,84.91
+stress-13,semantic,did no sin,1 Peter 2:22,(no match),,,False,False,True,0.93,1.77,0.0,,2.71
+stress-14,semantic,my father and your father my God and your God,John 20:17,(no match),,,False,False,True,2.0,27.28,0.0,,29.29
+stress-15,semantic,God said i will not be wroth with thee,Isaiah 54:9,Isaiah 54:9,semantic,1.0,True,False,False,1.3,197.73,54.25,,253.29
+stress-16,semantic,sing o barren,Isaiah 54:1,Isaiah 54:1,semantic,1.0,True,False,False,0.61,194.67,57.39,,252.69
+stress-17,semantic,for the weapons of our warfare are not carnal,2 Corinthians 10:4,2 Corinthians 10:4,semantic,0.69,True,False,False,1.79,37.26,68.15,,107.22
+stress-17b,semantic,it is finished,John 19:30,John 19:30,semantic,1.0,True,False,False,1.21,288.8,58.73,,348.76
+stress-18,semantic,we have a strong consolation,Hebrews 6:18,Hebrews 6:18,semantic,1.0,True,False,False,0.93,275.69,56.12,,332.76
+stress-19,semantic,he is able to save to the uttermost,Hebrews 7:25,Hebrews 7:25,semantic,1.0,True,False,False,2.51,319.17,61.83,,383.51
+stress-20,semantic,being justified freely,Romans 3:24,Romans 3:24,semantic,1.0,True,False,False,0.31,237.6,86.35,,324.27
+stress-21,semantic,they have hated me without a cause,John 15:25,(no match),,,False,False,True,1.51,87.77,0.0,,89.29
+stress-22,semantic,never leave you forsake you,Hebrews 13:5,Hebrews 13:5,semantic,1.0,True,False,False,1.21,247.67,58.62,,307.51
+stress-23,semantic,he became the propitiation for our sins,1 John 2:2,1 John 2:2,semantic,0.594,True,False,False,1.42,37.79,76.97,,116.19
+stress-24,semantic,His feet are like fine brass,Revelation 1:15,Revelation 2:18,semantic,0.612,False,False,False,1.54,37.85,87.1,,126.5
+stress-25,semantic,soul that sinneth must die,Ezekiel 18:20,Ezekiel 18:4,semantic,0.531,False,False,False,0.89,48.54,57.23,,106.68
+stress-26,semantic,having therefore boldness to enter,Hebrews 10:19,Hebrews 10:19,semantic,0.517,True,False,False,1.73,43.35,69.13,,114.23
+stress-27,semantic,God said to moses i will make my goodness pass before thee,Exodus 33:19,Exodus 33:19,semantic,0.7,True,False,False,3.67,49.13,82.3,,135.11
+stress-28,semantic,prodigal son came home,Luke 15:11,Luke 15:11,semantic,1.0,True,False,False,0.75,276.47,58.57,,335.8
+stress-29,semantic,an heir so long as he is a child,Galatians 4:1,Galatians 4:1,semantic,0.656,True,False,False,1.65,33.01,61.73,,96.4
+stress-30,semantic,ye are Abrahams seed and heirs,Galatians 3:29,Galatians 3:29,semantic,0.614,True,False,False,0.93,24.63,72.17,,97.74
+stress-31,semantic,he must need go through samaria,John 4:4,John 4:4,semantic,0.691,True,False,False,0.93,26.55,48.11,,75.6
+stress-32,semantic,the blessings of the lord are upon the head of the just,Proverbs 10:6,Proverbs 10:6,semantic,0.509,True,False,False,2.02,28.19,51.16,,81.37
+stress-33,semantic,God is angry with the wicked always,Psalms 7:11,Psalms 7:11,semantic,0.58,True,False,False,1.01,19.45,55.64,,76.11
+stress-34,semantic,no weapon formed against me shall prosper,Isaiah 54:17,Isaiah 54:17,semantic,1.0,True,False,False,1.05,189.34,29.76,,220.22
+stress-35,semantic,why is thy countenance fallen,Genesis 4:6,Genesis 4:6,semantic,0.711,True,False,False,0.46,24.17,69.94,,94.58
+stress-36,semantic,sin is at thy door and thou shall rule over him,Genesis 4:7,Genesis 4:7,semantic,0.606,True,False,False,3.55,44.85,66.03,,114.45
+stress-37,semantic,by His stripes we were healed,Isaiah 53:5,Isaiah 53:5,semantic,0.522,True,False,False,1.26,40.01,67.45,,108.74
+stress-38,semantic,riotous living,Luke 15:13,Luke 15:13,semantic,1.0,True,False,False,0.37,248.49,57.19,,306.07
+stress-39,semantic,be sober be vigilant your adversary the devil,1 Peter 5:8,1 Peter 5:8,semantic,0.657,True,False,False,1.35,46.81,69.2,,117.37
+stress-40,semantic,grace of God appeared unto all men,Titus 2:11,Titus 2:11,semantic,0.615,True,False,False,2.25,40.74,85.74,,128.75
+stress-41,semantic,love covers a multitude of sins,1 Peter 4:8,Proverbs 10:12,semantic,0.561,False,False,False,1.07,35.27,87.09,,123.44
+stress-42,semantic,the earth was without form and void,Genesis 1:2,Genesis 1:2,semantic,0.782,True,False,False,2.24,45.68,74.43,,122.35
+stress-43,semantic,those things which be not as though they were,Romans 4:17,(no match),,,False,False,True,2.83,41.01,0.0,,43.84
+stress-44,semantic,without faith it is impossible to please God,Hebrews 11:6,Hebrews 11:6,semantic,1.0,True,False,False,1.74,357.85,64.52,,424.12
+stress-45,semantic,walk by Faith not by sight,2 Corinthians 5:7,2 Corinthians 5:7,semantic,1.0,True,False,False,1.2,267.86,55.96,,325.04
+stress-46,semantic,Abraham did not look at the deadness of Sarahs womb,Romans 4:19,Romans 4:19,semantic,1.0,True,False,False,1.62,296.53,54.13,,352.3
+stress-47,semantic,now faith is the substance of things hoped for,Hebrews 11:1,Hebrews 11:1,semantic,1.0,True,False,False,2.45,319.07,60.4,,381.94
+stress-48,semantic,faith is the evidence of things not seen,Hebrews 11:1,Hebrews 11:1,semantic,0.606,True,False,False,1.34,35.46,79.81,,116.63
+stress-49,semantic,the communication of your faith may become more effectual,Philemon 1:6,Philemon 1:6,semantic,0.588,True,False,False,2.87,44.97,63.33,,111.19
+stress-50,semantic,what has been is what shall be,Ecclesiastes 1:9,(no match),,,False,False,True,1.14,39.28,0.0,,40.42
+stress-51,semantic,in the book of Isaiah that our best works are like filthy rags,Isaiah 64:6,Isaiah 64:6,semantic,0.627,True,False,False,4.04,35.54,29.29,,68.87
+stress-52,direct,eph 1.3 tells us that we are already blessed,Ephesians 1:3,Ephesians 1:3,direct,0.97,True,False,False,0.7,0.0,30.41,,31.12
+stress-53,semantic,looking unto Jesus,Hebrews 12:2,Hebrews 12:2,semantic,0.644,True,False,False,0.26,19.5,23.53,,43.29

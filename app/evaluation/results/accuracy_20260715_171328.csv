@@ -1,0 +1,33 @@
+id,case_type,input,expected,detected,match_type,confidence,correct,false_positive,missed,direct_ref_ms,semantic_ms,db_lookup_ms,asr_ms,total_ms
+direct-1,direct,John 3:16,John 3:16,John 3:16,direct,0.97,True,False,False,9.06,0.0,600.07,,609.14
+direct-2,direct,John chapter 3 verse 16,John 3:16,John 3:16,direct,0.97,True,False,False,0.26,0.0,32.16,,32.43
+direct-3,direct,Mark 1 2,Mark 1:2,Mark 1:2,direct,0.97,True,False,False,0.27,0.0,32.51,,32.78
+direct-4,direct,Mark 12,Mark 12:1,Mark 12:1,direct,0.97,True,False,False,0.25,0.0,24.51,,24.77
+direct-5,direct,Matthew 6.33,Matthew 6:33,Matthew 6:33,direct,0.97,True,False,False,0.27,0.0,24.99,,25.27
+direct-6,direct,Matthew 5 verse 10,Matthew 5:10,Matthew 5:10,direct,0.97,True,False,False,0.28,0.0,26.8,,27.08
+direct-7,direct,Romans eight twenty eight,Romans 8:28,Romans 8:28,direct,0.97,True,False,False,0.35,0.0,26.94,,27.3
+direct-8,direct,First Corinthians 13:4,1 Corinthians 13:4,1 Corinthians 13:4,direct,0.97,True,False,False,0.26,0.0,25.69,,25.96
+direct-9,direct,Ps 23:1,Psalms 23:1,Psalms 23:1,direct,0.97,True,False,False,0.24,0.0,25.46,,25.71
+direct-10,direct,Revelations 3:20,Revelation 3:20,Revelation 3:20,direct,0.97,True,False,False,0.32,0.0,25.12,,25.44
+semantic-1,semantic,for god so loved the world,John 3:16,John 3:16,semantic,1.0,True,False,False,0.72,112.42,24.21,,137.36
+semantic-2,semantic,I am the way the truth and the life,John 14:6,John 14:6,semantic,1.0,True,False,False,0.73,103.16,27.37,,131.28
+semantic-3,semantic,the lord is my shepherd,Psalms 23:1,Psalms 23:1,semantic,1.0,True,False,False,0.5,55.99,24.15,,80.65
+semantic-4,semantic,I can do all things through christ,Philippians 4:13,Philippians 4:13,semantic,1.0,True,False,False,0.65,119.99,24.2,,144.85
+semantic-5,semantic,all things work together for good,Romans 8:28,Romans 8:28,semantic,1.0,True,False,False,0.57,113.46,24.51,,138.55
+semantic-6,semantic,trust in the lord with all your heart,Proverbs 3:5,Proverbs 3:5,semantic,1.0,True,False,False,0.99,65.85,24.83,,91.68
+semantic-7,semantic,the prodigal son,Luke 15:11,Luke 15:11,semantic,1.0,True,False,False,0.36,105.44,27.16,,132.97
+semantic-8,semantic,david and goliath,1 Samuel 17:1,1 Samuel 17:1,semantic,1.0,True,False,False,0.45,34.55,26.6,,61.61
+semantic-9,semantic,be strong and do not be afraid for god is with you,Deuteronomy 31:6,Deuteronomy 31:6,semantic,0.542,True,False,False,0.97,40.66,25.9,,67.54
+semantic-10,semantic,god will supply everything you need,Philippians 4:19,Philippians 4:19,semantic,0.549,True,False,False,0.53,14.89,33.71,,49.14
+semantic-11,semantic,if you have faith you can move a mountain,Matthew 17:20,Matthew 17:20,semantic,1.0,True,False,False,1.29,129.82,32.08,,163.2
+semantic-12,semantic,nothing can separate us from the love of god,Romans 8:35,Romans 8:35,semantic,1.0,True,False,False,0.82,98.26,21.26,,120.34
+semantic-13,semantic,"So when Paul was talking about the law of God, he said I see then another law",Romans 7:23,Romans 7:23,semantic,0.506,True,False,False,1.11,26.73,24.49,,52.34
+nomatch-1,no_match_expected,good morning everyone how are you today,:,(no match),,,False,False,False,0.6,13.74,0.0,,14.35
+nomatch-2,no_match_expected,can you hear me at the back,:,(no match),,,False,False,False,0.52,13.25,0.0,,13.78
+nomatch-3,no_match_expected,lets all stand and worship together,:,(no match),,,False,False,False,0.92,16.08,0.0,,17.01
+nomatch-4,no_match_expected,thank you pastor for that word,:,(no match),,,False,False,False,0.47,13.75,0.0,,14.22
+nomatch-5,no_match_expected,lets pray before we continue,:,(no match),,,False,False,False,0.41,17.47,0.0,,17.88
+nomatch-6,no_match_expected,god is good all the time,:,(no match),,,False,False,False,0.91,18.38,0.0,,19.29
+nomatch-7,no_match_expected,we need to have faith in god,:,Mark 11:22,semantic,0.56,False,True,False,0.56,13.47,24.33,,38.37
+nomatch-8,no_match_expected,i believe god is with us today,:,(no match),,,False,False,False,0.59,21.02,0.0,,21.61
+nomatch-9,no_match_expected,god loves each and every one of us,:,1 John 4:7,semantic,0.545,False,True,False,0.59,14.37,26.03,,40.99

@@ -25,7 +25,69 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional, Tuple, List, Iterable, FrozenSet
 
+from rapidfuzz import fuzz
+
 from app.retrieval import aliases_en, aliases_twi
+
+# ============================================================
+# FUZZY MATCHING — deliberately conservative, see _fuzzy_lookup's own
+# docstring for the false-positive investigation behind these numbers.
+# ============================================================
+# Below this length, a candidate word is NOT considered for fuzzy
+# matching at all, full stop — this is the primary safety mechanism,
+# not the ratio threshold alone. Confirmed live: real, common sermon
+# words ("father", "nation") score 67 against real book aliases
+# ("esther", "lamentations") — the SAME ratio range needed to catch
+# genuine ASR garbling ("kyeɛmu" vs "nkyekyemu" = 67). Ratio alone
+# can't safely separate those two cases; word length can, since the
+# dangerous collisions above are 6-7 letter common words being confused
+# with LONGER book names, whereas raising the ratio bar high enough to
+# exclude them (~80+) still catches the clearest garbling cases
+# ("gyenisis" vs "gyenesis" = 88, "nkyikyemu" vs "nkyekyemu" = 89).
+_FUZZY_MIN_CANDIDATE_LEN = 6
+_FUZZY_MIN_RATIO = 82
+
+
+def _fuzzy_lookup(word: str, choices: dict) -> Optional[str]:
+    """word -> choices[best match], or None if no candidate clears
+    _FUZZY_MIN_RATIO, or the top-scoring candidates disagree on the
+    ANSWER (avoids picking arbitrarily between two genuinely different
+    targets). `choices` maps alias-string -> canonical value (same
+    shape as bundle.book_aliases / bundle.structural_words) — only
+    single-word keys are considered, since a garbled single ASR token
+    can't meaningfully match a multi-word alias by position anyway.
+
+    Ambiguity is judged by canonical VALUE, not raw alias string — e.g.
+    "collossians" (90.9) and "colosians" (90.0) are both aliases for
+    Colossians, so there's no real ambiguity even though their scores
+    are a hair apart; comparing raw scores alone (an earlier version of
+    this function did) rejected that case as a false ambiguity. Only
+    reject when the near-top candidates point to genuinely DIFFERENT
+    books/values."""
+    if len(word) < _FUZZY_MIN_CANDIDATE_LEN:
+        return None
+
+    scored = [
+        (fuzz.ratio(word, alias), choices[alias])
+        for alias in choices
+        if " " not in alias
+    ]
+    if not scored:
+        return None
+
+    scored.sort(reverse=True)
+    best_score, best_value = scored[0]
+
+    if best_score < _FUZZY_MIN_RATIO:
+        return None
+
+    for score, value in scored[1:]:
+        if score < best_score - 3:
+            break
+        if value != best_value:
+            return None  # genuinely ambiguous — two DIFFERENT answers this close
+
+    return best_value
 
 # ============================================================
 # LANGUAGE MERGE
@@ -182,6 +244,20 @@ def _text_normalise(text: str, bundle: _LangBundle) -> str:
     # aliases_en.py/aliases_twi.py's STRUCTURAL_WORDS.
     for wrong, right in bundle.structural_words.items():
         text = re.sub(rf"\b{re.escape(wrong)}\b", right, text)
+
+    # Fuzzy fallback for structural words an ASR engine garbled beyond
+    # the exact substitution above (see _fuzzy_lookup's docstring for
+    # why this is conservative on purpose) — e.g. "nkyikyemu" (a real
+    # offline-model mis-transcription of "nkyekyemu") still becomes
+    # "verse" even though it never matched the exact regex above.
+    words = text.split()
+    for idx, w in enumerate(words):
+        if w in ("chapter", "verse"):
+            continue
+        hit = _fuzzy_lookup(w, bundle.structural_words)
+        if hit:
+            words[idx] = hit
+    text = " ".join(words)
 
     text = text.replace(":", " : ")
     text = text.replace("-", " - ")
@@ -461,8 +537,19 @@ def _extract_all_references_verbose(
                 break
 
         if not matched_book:
-            i += 1
-            continue
+            # Fuzzy fallback (see _fuzzy_lookup's docstring) — catches a
+            # single garbled token an offline ASR model mis-transcribed
+            # ("gyenisis" for "gyenesis") that the exact lookup above
+            # necessarily misses. Deliberately conservative (min length
+            # + high ratio threshold): only a single-word candidate is
+            # tried, never a multi-word alias by position.
+            fuzzy_book = _fuzzy_lookup(words[i], bundle.book_aliases)
+            if fuzzy_book:
+                matched_book = fuzzy_book
+                matched_len = 1
+            else:
+                i += 1
+                continue
 
         j = i + matched_len
 

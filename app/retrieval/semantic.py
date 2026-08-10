@@ -914,6 +914,13 @@ class SemanticEngine:
         if self.index is None or not self.verse_store:
             raise RuntimeError("Call load_version() first.")
 
+        # Twi: direct-reference matching only, by deliberate choice — see
+        # search_top_k's own note on this. Checked first, before even the
+        # curated phrase/event maps below, so nothing semantic-derived
+        # can reach a caller for this version.
+        if str(self.active_version).upper() == "TWI":
+            return None
+
         cleaned_query = clean_text(query)
 
         if not cleaned_query:
@@ -1023,6 +1030,10 @@ class SemanticEngine:
         if self.index is None or not self.verse_store:
             raise RuntimeError("Call load_version() first.")
 
+        # Twi: direct-reference matching only — see search_top_k's note.
+        if str(self.active_version).upper() == "TWI":
+            return None
+
         cleaned_query = clean_text(query)
 
         if not cleaned_query or is_casual_query(cleaned_query):
@@ -1068,6 +1079,22 @@ class SemanticEngine:
     ) -> List[dict]:
         if self.index is None:
             raise RuntimeError("Call load_version() first.")
+
+        # Twi: direct-reference matching only, for now — by explicit
+        # decision, not an oversight. all-MiniLM-L6-v2 (MODEL_NAME above)
+        # is English-only; measured directly against real Twi verses, its
+        # "semantic" matches are close to noise (a Twi query for "God
+        # loves the world" didn't even surface John 3:16 in its top 5,
+        # and the same query in English returned verses with no thematic
+        # relation at all). A TWI.faiss index exists on disk (built
+        # automatically the first time this version loads, same as any
+        # other), but returning early here means it's never actually
+        # queried — direct reference lookups (aliases_twi.py,
+        # reference_extractor.py) are unaffected, since they don't go
+        # through this class at all. Revisit once the corpus is
+        # re-embedded with a genuinely multilingual model.
+        if str(self.active_version).upper() == "TWI":
+            return []
 
         cleaned_query = clean_text(query)
 

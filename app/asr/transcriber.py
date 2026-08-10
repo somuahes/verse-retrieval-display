@@ -76,6 +76,50 @@ _should_probe_cloud/_recover_to_cloud periodically retry cloud in the
 background (Config.cloud_retry_interval_s) and switch back automatically
 the moment a probe succeeds, so a session started with cloud as primary
 returns to cloud on its own once internet/Groq comes back.
+
+Twi backend (Config.backend="khaya"): a fourth, explicit-only backend —
+never selected by "auto" (which only ever weighs Groq vs. local for
+English content) — for GhanaNLP's Khaya API
+(https://translation.ghananlp.org), the one ASR option that actually
+supports Twi. Neither local faster-whisper nor Groq's hosted Whisper
+has real Twi support: Whisper (open or hosted) was never trained on
+Twi/Akan at all, and the two Akan-labeled fine-tunes evaluated for this
+project separately (models/twi_candidates/) measured 93-96% WER on real
+audio — unusable. Khaya's standard ASR model, benchmarked directly
+against this project's own test sentences, does not have this problem.
+
+Deliberately NOT wired into _fallback_to_local like the Groq path: a
+failed Khaya request drops that utterance instead (see _decode_khaya) —
+falling back to a local Whisper model with no real Twi support would
+silently produce confident English-shaped garbage on Twi audio, which
+is worse than producing nothing. Requires Config.language="tw" (or
+whatever Khaya language code applies) — Khaya is Ghanaian/African-
+language-specific and isn't a general substitute for the English auto/
+local/cloud choice above. Falls back to the KHAYA_API_KEY env var when
+Config.khaya_api_key is None, mirroring GROQ_API_KEY's pattern.
+
+Khaya's response has no per-segment confidence data (no avg_logprob/
+no_speech_prob/compression_ratio the way Whisper's verbose_json does)
+so _passes_segment_gates's numeric checks are inert for this backend by
+construction (all three args passed as None) — only _is_prompt_echo and
+the language-independent checks in _is_bad_output (word-count floor,
+repetition-loop detection) still apply.
+
+Offline Twi backend (Config.backend="w2vbert"): a free, fully offline
+alternative to Khaya, for testing when Khaya's quota is exhausted or
+network isn't available — NOT a recommended primary choice. Uses
+ghananlpcommunity/w2v-bert-2.0_twi_alpha_v1-onnx-int8 (a genuinely
+Twi-fine-tuned Wav2Vec2-BERT model, quantized for CPU), benchmarked
+directly against this project's own 30-sentence test set at 73.6% WER —
+meaningfully better than the two Whisper-based Akan candidates (93-96%
+WER) but nowhere near Khaya's measured quality. Runs entirely locally
+via onnxruntime — no API key, no quota, no network after the first
+download (cached by huggingface_hub same as any other model here). No
+per-segment confidence data either (same _passes_segment_gates
+treatment as Khaya, all three numeric args None). Downloads on first
+use if not already cached — this can be slow/flaky on an unreliable
+connection (see models/twi_candidates/ setup notes elsewhere in this
+project for that history), but it's a one-time cost per machine.
 """
 
 import argparse
@@ -90,6 +134,7 @@ from dataclasses import dataclass
 from typing import Callable, List, Optional
 
 import numpy as np
+import requests
 import sounddevice as sd
 import soundfile as sf
 from faster_whisper import WhisperModel
@@ -137,6 +182,16 @@ class Config:
     # _should_probe_cloud/_recover_to_cloud.
     cloud_retry_interval_s: float = 30.0
 
+    # Falls back to the KHAYA_API_KEY env var when None — see module
+    # docstring's "Twi backend" section. Only used when backend="khaya".
+    khaya_api_key: Optional[str] = None
+
+    # language is passed to whichever backend is active: faster-whisper's
+    # language= for local, Groq's language= for cloud, and Khaya's
+    # ?language= query param for khaya (where it must be a Khaya-
+    # supported code, e.g. "tw" for Twi — see GET /languages on
+    # https://translation.ghananlp.org). "en" is meaningless to Khaya;
+    # set this explicitly when using backend="khaya".
     language: Optional[str] = "en"
 
     sample_rate: int = 16000
@@ -280,6 +335,10 @@ class BibleAITranscriber:
 
         if self.backend == "cloud":
             self._init_cloud_backend()
+        elif self.backend == "khaya":
+            self._init_khaya_backend()
+        elif self.backend == "w2vbert":
+            self._init_w2vbert_backend()
         else:
             self._init_local_backend()
 
@@ -333,14 +392,18 @@ class BibleAITranscriber:
     def _resolve_backend(self) -> str:
         backend = self.config.backend
 
-        if backend not in ("auto", "local", "cloud"):
+        if backend not in ("auto", "local", "cloud", "khaya", "w2vbert"):
             raise ValueError(
-                f"Config.backend must be 'auto', 'local', or 'cloud', got {backend!r}"
+                f"Config.backend must be 'auto', 'local', 'cloud', "
+                f"'khaya', or 'w2vbert', got {backend!r}"
             )
 
         if backend != "auto":
             return backend
 
+        # "auto" only ever weighs Groq vs. local, both English-focused —
+        # khaya is Twi-specific and must be requested explicitly (see
+        # module docstring's "Twi backend" section), never auto-selected.
         # Groq is the primary path whenever a key is configured — local
         # (GPU if available, else CPU) is the fallback for sessions/
         # machines with no key set, not the other way around.
@@ -370,8 +433,14 @@ class BibleAITranscriber:
         conservative raise (not unbounded — still bounded per the
         original design's own goal, see the comment on self._executor)
         rather than a number tuned against a specific, unknown-to-us Groq
-        rate limit."""
-        return 4 if self.backend == "cloud" else 2
+        rate limit. khaya is the same I/O-bound shape as cloud (an HTTP
+        call, not local CPU work), so it gets the same treatment —
+        Khaya's free-tier rate limit (10 req/min on the Developer plan)
+        is well under even 2 concurrent workers' realistic throughput
+        anyway, so this isn't the binding constraint for that tier.
+        w2vbert falls into the CPU-bound branch below (same as local) —
+        it's a local ONNX model, not a network call."""
+        return 4 if self.backend in ("cloud", "khaya") else 2
 
     def _resize_executor_for_backend(self):
         """Keep the dispatch pool sized for whichever backend is
@@ -525,6 +594,91 @@ class BibleAITranscriber:
             f"'{self.config.groq_model}' for transcription.\n"
             "Each utterance's audio will be sent to Groq's API.\n"
         )
+
+    def _init_khaya_backend(self):
+        api_key = self.config.khaya_api_key or os.environ.get("KHAYA_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "backend='khaya' was requested but no KHAYA_API_KEY is set. "
+                "Set the KHAYA_API_KEY environment variable (a Khaya API "
+                "subscription key from https://translation.ghananlp.org), "
+                "or pass Config(backend='local'/'cloud') to use a "
+                "different backend instead."
+            )
+
+        self._khaya_api_key = api_key
+
+        print(
+            f"\n[Khaya backend] backend='khaya' was set explicitly - "
+            f"using GhanaNLP's Khaya ASR API (language="
+            f"{self.config.language!r}) for transcription.\n"
+            "Each utterance's audio will be sent to Khaya's API. A failed "
+            "request drops that utterance rather than falling back to a "
+            "local model with no real Twi support (see module "
+            "docstring).\n"
+        )
+
+    # CTranslate2 build, not the plain ONNX one — measured directly on
+    # this project's own hardware: ~13s to decode a 7s clip on ONNX vs.
+    # ~5.9s average (best run 5.5s) on CTranslate2 with
+    # intra_threads=16, the empirically-found sweet spot for this
+    # machine's 8 physical cores (going higher, e.g. 24/32, measured
+    # WORSE — 8.9s/7.7s — from thread contention, not better). Still not
+    # true real-time for a 7s clip, but more than 2x faster than the
+    # ONNX path this replaced. Same underlying weights/accuracy (73.6%
+    # WER) — this only changes inference speed, not quality.
+    _W2VBERT_REPO = "ghananlpcommunity/w2v-bert-2.0_twi_alpha_v1_farmerline-ct2"
+    _W2VBERT_PROCESSOR_REPO = "ghananlpcommunity/w2v-bert-2.0_twi_alpha_v1"
+    _W2VBERT_INTRA_THREADS = 16
+
+    def _init_w2vbert_backend(self):
+        # Lazy imports — ctranslate2/transformers are only needed for
+        # this one backend, not the rest of the app (same reasoning as
+        # groq's lazy import in _init_cloud_backend above). ctranslate2
+        # itself is already an indirect dependency via faster-whisper,
+        # but the Wav2Vec2Bert model class specifically is only used
+        # here.
+        try:
+            import ctranslate2
+            from transformers import AutoProcessor
+        except ImportError as e:
+            raise ImportError(
+                "backend='w2vbert' requires ctranslate2 and transformers: "
+                "pip install ctranslate2 transformers"
+            ) from e
+
+        print(
+            "\n[Offline Twi backend] backend='w2vbert' was set explicitly "
+            "- using a local, offline Twi ASR model (no API key, no "
+            "quota). Measured at 73.6% WER on this project's own test "
+            "set — meaningfully worse than Khaya, intended for testing "
+            "while Khaya is unavailable, not as a primary choice (see "
+            "module docstring). ~5.9s average to decode a 7s clip on "
+            "this machine — still not true real-time.\n"
+            "Loading model (downloads on first use if not cached, "
+            "~1.2GB)...\n"
+        )
+
+        # The CT2 repo ships weights only (model.bin), no
+        # preprocessor_config.json — the processor/tokenizer config
+        # comes from the fp32 parent repo instead (confirmed identical
+        # vocab/feature-extraction settings; CT2 conversion only changes
+        # the weights format, not preprocessing).
+        self._w2vbert_processor = AutoProcessor.from_pretrained(
+            self._W2VBERT_PROCESSOR_REPO
+        )
+
+        from huggingface_hub import snapshot_download
+        model_dir = snapshot_download(repo_id=self._W2VBERT_REPO)
+        self._w2vbert_model = ctranslate2.models.Wav2Vec2Bert(
+            model_dir,
+            device="cpu",
+            compute_type="int8",
+            intra_threads=self._W2VBERT_INTRA_THREADS,
+        )
+        self._ctranslate2 = ctranslate2  # kept for StorageView in decode
+
+        print("Offline Twi model loaded.\n")
 
     def _rms(self, audio: np.ndarray) -> float:
         if audio.size == 0:
@@ -1052,6 +1206,119 @@ class BibleAITranscriber:
 
         return parts
 
+    def _decode_khaya(self, audio: np.ndarray) -> Optional[List[str]]:
+        """Returns None on request failure (network drop, outage, rate
+        limit, non-2xx response) so the caller drops the utterance rather
+        than falling back to a local model with no real Twi support (see
+        module docstring's "Twi backend" section — this is the one
+        intentional difference from _decode_cloud's fallback-enabling
+        contract, even though the return-None-on-failure shape matches).
+
+        Response shape verified directly against the live API (see
+        PROJECT_STATUS.md / session notes): a 200 response body is a bare
+        JSON-encoded string (e.g. '"the transcribed text"'), not an
+        object — unlike Groq's verbose_json, there is no per-segment
+        confidence data here, so _passes_segment_gates is called with
+        avg_logprob/no_speech_prob/compression_ratio all None (see that
+        method — a None arg skips its corresponding check entirely)."""
+        wav_bytes = self._encode_wav(audio)
+
+        url = "https://translation-api.ghananlp.org/asr/v1/transcribe"
+        headers = {
+            "Content-Type": "audio/wav",
+            "Ocp-Apim-Subscription-Key": self._khaya_api_key,
+        }
+
+        try:
+            response = requests.post(
+                url,
+                headers=headers,
+                params={"language": self.config.language},
+                data=wav_bytes,
+                timeout=20,
+            )
+        except requests.RequestException as e:
+            log.warning("Khaya transcription request failed: %s", e)
+            return None
+
+        if not response.ok:
+            # raise_for_status()'s exception message is just the status
+            # line ("403 Client Error: Forbidden for url: ...") — it does
+            # NOT include the response body, which is where Azure API
+            # Management (what Khaya's portal runs on) actually puts the
+            # real reason (e.g. a quota-exceeded message on a 403).
+            # Logging body text directly here was the difference between
+            # "it's failing, no idea why" and an actionable diagnosis the
+            # first time this happened live.
+            log.warning(
+                "Khaya transcription request failed: %s %s for url: %s "
+                "-- response body: %s",
+                response.status_code,
+                response.reason,
+                response.url,
+                response.text[:500],
+            )
+            return None
+
+        try:
+            raw = response.json()
+        except ValueError as e:
+            log.warning(
+                "Khaya returned a non-JSON response body: %s -- %r",
+                e, response.text[:500],
+            )
+            return None
+
+        if not isinstance(raw, str):
+            log.warning(
+                "Khaya returned an unexpected response shape (expected a "
+                "bare string, got %s): %r",
+                type(raw).__name__,
+                raw,
+            )
+            return None
+
+        raw = raw.strip()
+        if not raw:
+            return []
+
+        if not self._passes_segment_gates(raw, None, None, None):
+            return []
+
+        return [raw]
+
+    def _decode_w2vbert(self, audio: np.ndarray) -> List[str]:
+        """Offline Twi decode via CTranslate2's Wav2Vec2Bert model — see
+        module docstring's "Offline Twi backend" section and
+        _init_w2vbert_backend's comment on why CTranslate2 over plain
+        ONNX (~5.9s vs. ~13s average per 7s clip on this machine's
+        hardware, same underlying weights/accuracy either way). No
+        network call, so no request-failure path the way
+        _decode_khaya/_decode_cloud have; an unexpected inference error
+        just propagates up to _transcribe_utterance's own broad except,
+        same as any other unexpected failure there. No per-segment
+        confidence data (same as Khaya), so _passes_segment_gates gets
+        None for all three numeric args."""
+        import numpy as _np  # local alias only to avoid shadowing risk
+
+        inputs = self._w2vbert_processor(
+            audio, sampling_rate=self.config.sample_rate, return_tensors="np"
+        )
+        input_features = inputs["input_features"].astype(_np.float32)
+        storage = self._ctranslate2.StorageView.from_array(input_features)
+
+        logits = _np.array(self._w2vbert_model.encode(storage, to_cpu=True))
+        predicted_ids = _np.argmax(logits, axis=-1)
+        raw = self._w2vbert_processor.batch_decode(predicted_ids)[0].strip()
+
+        if not raw:
+            return []
+
+        if not self._passes_segment_gates(raw, None, None, None):
+            return []
+
+        return [raw]
+
     def _transcribe_utterance(self, audio: np.ndarray, started_at: float):
         try:
             if self._rms(audio) < self.config.silence_threshold:
@@ -1066,7 +1333,20 @@ class BibleAITranscriber:
                 )
                 return
 
-            if self.backend == "cloud":
+            if self.backend == "khaya":
+                # No fallback-to-local on failure, unlike the cloud path
+                # below — see module docstring's "Twi backend" section.
+                parts = self._decode_khaya(audio)
+                if parts is None:
+                    log.warning(
+                        "Dropped utterance — Khaya request failed and "
+                        "backend='khaya' has no local fallback (no local "
+                        "model has real Twi support)"
+                    )
+                    parts = []
+            elif self.backend == "w2vbert":
+                parts = self._decode_w2vbert(audio)
+            elif self.backend == "cloud":
                 parts = self._decode_cloud(audio)
                 if parts is None:
                     self._fallback_to_local("cloud request failed")
@@ -1190,14 +1470,28 @@ def main():
     parser.add_argument("--endpoint-silence-ms", type=int, default=350)
     parser.add_argument("--max-utterance-seconds", type=float, default=10.0)
     parser.add_argument(
-        "--backend", type=str, default="auto", choices=["auto", "local", "cloud"],
+        "--backend", type=str, default="auto",
+        choices=["auto", "local", "cloud", "khaya", "w2vbert"],
         help="'auto' (default) uses Groq's cloud Whisper API as the primary "
              "backend if GROQ_API_KEY is set, else falls back to local "
-             "(GPU if usable, else CPU)."
+             "(GPU if usable, else CPU). 'khaya' uses GhanaNLP's Khaya API "
+             "for Twi/Ghanaian-language ASR (requires KHAYA_API_KEY and "
+             "--language set to a Khaya-supported code, e.g. 'tw'). "
+             "'w2vbert' is a free, fully offline Twi ASR fallback (73.6%% "
+             "WER measured — meaningfully worse than Khaya, for testing "
+             "when Khaya is unavailable, not a primary choice). Neither "
+             "khaya nor w2vbert is ever selected by 'auto' — both must be "
+             "requested explicitly."
     )
     parser.add_argument(
         "--groq-model", type=str, default="whisper-large-v3",
         help="Only used when the cloud backend is active."
+    )
+    parser.add_argument(
+        "--language", type=str, default="en",
+        help="Spoken language code passed to whichever backend is active. "
+             "'en' for local/cloud (English). For --backend khaya, use a "
+             "Khaya-supported code instead (e.g. 'tw' for Twi)."
     )
 
     args = parser.parse_args()
@@ -1215,6 +1509,7 @@ def main():
             max_utterance_seconds=args.max_utterance_seconds,
             backend=args.backend,
             groq_model=args.groq_model,
+            language=args.language,
         )
     )
 

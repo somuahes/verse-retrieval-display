@@ -23,16 +23,27 @@ LANGUAGE = "twi"
 # ============================================================
 # BOOK NAME ALIASES
 # ============================================================
-# - New Testament names and most Old Testament PROPER-NOUN books
-#   (prophets, Ezra, Joshua, Ruth, Esther...) are standard
-#   transliterations, attested fairly consistently across Akan Christian
-#   literature — reasonably confident.
-# - The block marked "VERIFY" is genuinely uncertain: the Pentateuch
-#   (Genesis-Deuteronomy) may traditionally be numbered "1 Mose"-"5 Mose"
-#   in Twi Bibles descended from the (German) Basel Mission translation
-#   rather than transliterated — unconfirmed. Several OT books also have
-#   native-word (non-transliterated) titles with real diacritic/dialect
-#   (Akuapem vs. Asante) risk. DO NOT treat the VERIFY block as verified.
+# CONFIRMED block below (was "VERIFY" — now checked): cross-referenced
+# every entry in this file against the actual USFM headers (\h/\toc2/
+# \toc3) of the Biblica Open Asante Twi Contemporary Bible 2020 — the
+# same translation imported as this project's TWI Bible version
+# (data/tw_asante.json). Every book now has at least one alias sourced
+# directly from that translation's own stated name for itself, not a
+# guessed transliteration. A few entries below are ADDITIONS beyond
+# what that source uses verbatim (e.g. "roma" as a shorter form of its
+# "Romafoɔ", or "asomafoɔ" alone alongside the fuller "asomafoɔ
+# nnwuma") — those are still plausible natural short forms, just not
+# literally the header text, so slightly lower confidence than the
+# header-verbatim entries.
+# - The whole Pentateuch (Genesis-Deuteronomy) and Song of Solomon were
+#   previously MISSING entirely — this translation numbers Genesis-
+#   Deuteronomy "1 Mose"-"5 Mose" (confirming the old VERIFY note's
+#   guess about Basel Mission-descended numbering) and titles Song of
+#   Solomon "Nnwom Mu Dwom" ("song within songs").
+# - 1 Samuel, 2 Samuel, Daniel, Hosea, Amos, Nahum use the identical
+#   spelling in this Twi translation as in English, so they need no
+#   separate entry here — aliases_en.py's existing English aliases
+#   already match them.
 # - ASCII fallbacks (no ɛ/ɔ) are included alongside diacritic forms
 #   throughout, since ASR/typed input is unlikely to ever produce the
 #   Akan-specific characters.
@@ -43,17 +54,30 @@ BOOK_ALIASES: dict[str, str] = {
     "yohane": "John",
     "asomafo nnwuma": "Acts",
     "asomafoɔ nnwuma": "Acts",
+    "asomafoɔ": "Acts",
+    "asomafo": "Acts",
     "roma": "Romans",
+    "romafoɔ": "Romans",
+    "romafo": "Romans",
     "1 korintofo": "1 Corinthians",
+    "1 korintofoɔ": "1 Corinthians",
     "korintofo a edi kan": "1 Corinthians",
     "2 korintofo": "2 Corinthians",
+    "2 korintofoɔ": "2 Corinthians",
     "korintofo a ɛto so mmienu": "2 Corinthians",
     "galatafo": "Galatians",
+    "galatifoɔ": "Galatians",
+    "galatifo": "Galatians",
     "efesofo": "Ephesians",
+    "efesofoɔ": "Ephesians",
     "filipifo": "Philippians",
+    "filipifoɔ": "Philippians",
     "kolosefo": "Colossians",
+    "kolosefoɔ": "Colossians",
     "1 tesalonikafo": "1 Thessalonians",
+    "1 tesalonikafoɔ": "1 Thessalonians",
     "2 tesalonikafo": "2 Thessalonians",
+    "2 tesalonikafoɔ": "2 Thessalonians",
     "tesalonikafo": "Thessalonians",
     "1 timoteo": "1 Timothy",
     "2 timoteo": "2 Timothy",
@@ -61,6 +85,7 @@ BOOK_ALIASES: dict[str, str] = {
     "tito": "Titus",
     "filemon": "Philemon",
     "hebrifo": "Hebrews",
+    "hebrifoɔ": "Hebrews",
     "yakobo": "James",
     "1 petro": "1 Peter",
     "2 petro": "2 Peter",
@@ -75,14 +100,17 @@ BOOK_ALIASES: dict[str, str] = {
     "yohane adiyisem": "Revelation",
 
     "yosua": "Joshua",
+    "yos": "Joshua",
     "rut": "Ruth",
     "esra": "Ezra",
+    "ɛsra": "Ezra",
     "nehemia": "Nehemiah",
     "ɛster": "Esther",
     "ester": "Esther",
     "yesaia": "Isaiah",
     "yeremia": "Jeremiah",
     "esekiel": "Ezekiel",
+    "hesekiel": "Ezekiel",
     "yoɛl": "Joel",
     "yoel": "Joel",
     "obadia": "Obadiah",
@@ -94,7 +122,27 @@ BOOK_ALIASES: dict[str, str] = {
     "sakaria": "Zechariah",
     "malaki": "Malachi",
 
-    # VERIFY before production use — see confidence note above.
+    # Pentateuch — this translation numbers these "1 Mose"-"5 Mose"
+    # (Mose = Moses), with a parenthetical transliterated alt-name in
+    # its own header for each. Both forms included.
+    "1 mose": "Genesis",
+    "gyenesis": "Genesis",
+    "2 mose": "Exodus",
+    "ɛksodɔs": "Exodus",
+    "eksodos": "Exodus",
+    "3 mose": "Leviticus",
+    "lewitikɔs": "Leviticus",
+    "lewitikos": "Leviticus",
+    "4 mose": "Numbers",
+    "numeri": "Numbers",
+    "5 mose": "Deuteronomy",
+    "deuteronomium": "Deuteronomy",
+
+    "nnwom mu dwom": "Song of Solomon",
+
+    # Confirmed against the actual translation's own USFM headers (see
+    # note above this dict) — previously flagged "VERIFY before
+    # production use"; that flag is now resolved for these entries.
     "hiob": "Job",
     "1 ahemfo": "1 Kings",
     "2 ahemfo": "2 Kings",
@@ -160,11 +208,33 @@ NUM_WORDS: dict[str, int] = dict(NUMBER_WORDS)
 # verse number, e.g. "Yohane ti 3 nkyekyɛmu 16" = "John chapter 3 verse
 # 16". See aliases_en.py's STRUCTURAL_WORDS for how these get merged in.
 # ASCII fallback ("nkyekyemu") included per this file's usual pattern.
+#
+# Split-token variants ("nkyekyɛ mu", "nkyekye mu") added after real
+# Khaya output showed it sometimes transcribes this as two words with a
+# space instead of one — confirmed live: "Genesis t baako nkyekyɛ mu
+# baako" (intending "Genesis chapter 1 verse 1") failed to resolve
+# because the substitution below requires an exact single-token match,
+# and a mid-word space breaks that entirely. Without this, ANY split
+# ASR output for this word silently loses its "verse" marker instead of
+# reference detection just being unnaturally strict — dict keys can be
+# multi-word phrases here since the substitution is a word-boundary
+# regex, not a literal single-token lookup.
 # ============================================================
 STRUCTURAL_WORDS: dict[str, str] = {
     "ti": "chapter",
     "nkyekyɛmu": "verse",
     "nkyekyemu": "verse",
+    "nkyekyɛ mu": "verse",
+    "nkyekye mu": "verse",
+    # "t" alone: also confirmed live -- Khaya sometimes drops "ti" down to
+    # a bare "t". A single letter would normally be too risky to add (see
+    # the book-alias exclusions elsewhere in this file for words like
+    # "yes"/"ate" that ARE real English words) but "t" as a standalone
+    # spoken token essentially never occurs in real English speech, and
+    # even a wrong substitution here only ever injects an extra filler
+    # word that gets skipped past -- unlike a number word, it can't turn
+    # into a wrong chapter/verse digit on its own.
+    "t": "chapter",
 }
 
 # ============================================================
@@ -185,10 +255,27 @@ NAV_PHRASES: dict[str, str] = {
     "ko so":                "NEXT",   # ascii fallback (no ɔ)
     "kɔ akyi":              "PREV",   # "go back"
     "ko akyi":              "PREV",
-    "san ka":               "REPEAT", # "say again"
+    "san ka":               "REPEAT", # "say again" (san = "return")
+    "ka bio":               "REPEAT", # "say again" -- "bio" ("again/
+    "si so bio":            "REPEAT", # repeat") is dictionary-attested
+                                       # (akandictionary.com), more solidly
+                                       # confirmed than "san ka" above; kept
+                                       # both multi-word phrases rather than
+                                       # replacing since neither is confirmed
+                                       # wrong. Deliberately NOT adding bare
+                                       # "bio" alone -- unlike book-name
+                                       # aliases (gated to TWI-active only,
+                                       # see reference_extractor.py's
+                                       # _allowed_languages), NAV_PHRASES
+                                       # merges into a single GLOBAL dict
+                                       # checked regardless of active
+                                       # version, and "bio" is also an
+                                       # ordinary English word ("read her
+                                       # bio") that would misfire on
+                                       # English sermon speech.
     "nkyekyɛm no awiei":    "LAST",   # "the chapter's end"
     "nkyekyem no awiei":    "LAST",
-    "gyae":                 "STOP",   # "stop"
+    "gyae":                 "STOP",   # "stop" -- dictionary-confirmed
     "gyae kyerɛ":           "STOP",   # "stop showing"
     "gyae kyere":           "STOP",
 }

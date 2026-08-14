@@ -627,31 +627,17 @@ class ASRWorker(QThread):
     transcript_signal = pyqtSignal(str)
     status_signal     = pyqtSignal(str)
 
-    def __init__(self, device_index=None, engine=None, parent=None,
-                 backend="auto", language="en"):
+    def __init__(self, device_index=None, engine=None, parent=None):
         super().__init__(parent)
         self.device_index = device_index
         self.engine       = engine
         self.transcriber  = None
-        # backend/language chosen by _start_asr based on the ACTIVE Bible
-        # version at listen-start time (TWI -> backend="khaya",
-        # language="tw"; everything else -> the Config defaults below,
-        # unchanged from before this was added). Fixed for the lifetime
-        # of this worker, same as device_index — switching version
-        # mid-listen doesn't retroactively change the running backend,
-        # matching how the device combo is also locked while listening.
-        self.backend  = backend
-        self.language = language
 
     def run(self):
         try:
             self.status_signal.emit("loading")
             self.transcriber = BibleAITranscriber(
-                Config(
-                    device_index=self.device_index,
-                    backend=self.backend,
-                    language=self.language,
-                )
+                Config(device_index=self.device_index)
             )
 
             def _on_text(text: str):
@@ -1310,31 +1296,6 @@ class OperatorWindow(QMainWindow):
         row1.addWidget(refresh)
         lay.addLayout(row1)
 
-        # Only actually consulted when the active Bible version is TWI
-        # (see _asr_backend_for_active_version) — harmless to leave
-        # visible otherwise, same as the version combo itself not being
-        # hidden when its choice doesn't currently matter.
-        row2 = QHBoxLayout()
-        row2.setSpacing(6)
-        row2.addWidget(lbl("Twi engine:", 11, "text_d"))
-        self._twi_engine_combo = QComboBox()
-        self._twi_engine_combo.setStyleSheet(combo_qss())
-        self._twi_engine_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self._twi_engine_combo.addItem("Khaya (online, best accuracy)", "khaya")
-        self._twi_engine_combo.addItem("Offline (free, slower + lower accuracy)", "w2vbert")
-        self._twi_engine_combo.setToolTip(
-            "Khaya: GhanaNLP's hosted Twi ASR API — needs KHAYA_API_KEY "
-            "and internet, best measured accuracy.\n"
-            "Offline: a free, fully local fallback (73.6% WER measured on "
-            "this project's own test set) for when Khaya is unavailable "
-            "(quota exhausted, no internet) — meaningfully less accurate, "
-            "and ~5.9s to decode a 7s clip on this machine (not real-time; "
-            "expect it to fall behind during continuous speech). For "
-            "testing, not a primary choice."
-        )
-        row2.addWidget(self._twi_engine_combo, stretch=1)
-        lay.addLayout(row2)
-
         row3 = QHBoxLayout()
         row3.setSpacing(8)
         self._btn_listen = QPushButton("▶  Start Listening")
@@ -1649,29 +1610,11 @@ class OperatorWindow(QMainWindow):
         else:
             self._start_asr()
 
-    def _asr_backend_for_active_version(self):
-        """TWI is the one version with no real Whisper/Groq support (see
-        app/asr/transcriber.py's module docstring) — selecting TWI as the
-        active Bible version and starting listening routes to whichever
-        Twi ASR engine the Twi engine combo has selected (Khaya by
-        default — better measured accuracy — or the offline fallback for
-        when Khaya is unavailable). Every other version keeps the
-        existing English auto/local/cloud behavior unchanged."""
-        if str(self._engine.session.active_version).upper() == "TWI":
-            twi_backend = self._twi_engine_combo.currentData()
-            language = "tw" if twi_backend == "khaya" else "ak"
-            return twi_backend, language
-        return "auto", "en"
-
     def _start_asr(self):
-        backend, language = self._asr_backend_for_active_version()
-        self._active_asr_backend = backend
         self._asr = ASRWorker(
             device_index=self._selected_device(),
             engine=self._engine,
-            parent=self,
-            backend=backend,
-            language=language)
+            parent=self)
         self._asr.transcript_signal.connect(self._on_transcript)
         self._asr.status_signal.connect(self._on_asr_status)
         self._asr.start()
@@ -1681,13 +1624,8 @@ class OperatorWindow(QMainWindow):
         self._btn_listen.setText("Loading model…")
         self._btn_listen.setStyleSheet(btn_qss())
         self._btn_stop.setEnabled(True)
-        self._loading_lbl.setText(f"loading{self._engine_note(backend)}…")
+        self._loading_lbl.setText("loading…")
         self._set_badge("LOADING", "amber", "amber_d")
-
-    _ENGINE_LABELS = {"khaya": " (Khaya)", "w2vbert": " (Offline Twi)"}
-
-    def _engine_note(self, backend):
-        return self._ENGINE_LABELS.get(backend, "")
 
     def _stop_asr(self):
         if self._asr:
@@ -1706,8 +1644,7 @@ class OperatorWindow(QMainWindow):
         if status == "listening":
             self._loading_lbl.setText("")
             self._btn_listen.setEnabled(True)
-            engine_note = self._engine_note(getattr(self, "_active_asr_backend", None))
-            self._btn_listen.setText(f"● Listening{engine_note}")
+            self._btn_listen.setText("● Listening")
             self._btn_listen.setStyleSheet(btn_qss())
             self._set_badge("LISTENING", "green", "green_d")
         elif status == "loading":

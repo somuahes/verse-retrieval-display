@@ -17,24 +17,6 @@ updated for four new Operator Panel features (Browse, Session History,
 Queue reorder/save-load, Save-Image) and a `tests/` integration suite —
 see `PROGRESS.md` §22 for the full narrative.
 
-**Addendum, 2026-08-14** (retrieval + ASR — not a full regeneration, read
-this alongside the sections below rather than in place of them): three
-real false-positive classes were found and fixed via live testing —
-`semantic.py`'s phrase_map/event_map curated shortcuts firing at an
-unconditional 100% confidence with no context check (§3.2's description
-of the display-threshold math is otherwise unchanged), `version_detector.py`'s
-`NAV_MAP` triggering PREV/NEXT/REPEAT navigation on ordinary rhetorical
-preaching speech (§3.2's "two silent no-op bugs fixed" note is a
-different, earlier issue — this is a new one), and a semantic false
-positive when a forced `max_utterance_seconds` cut splits one paraphrase
-into two independently-scored fragments. Also: `endpoint_silence_ms`
-350→250ms, a Groq cloud connection warm-up at startup, and a real,
-pre-existing accuracy gap found on the stress/generalization test sets
-(74.5%/64.5% against a documented 81.8%/77.4% baseline, confirmed not
-caused by this session's changes) that §4/§5 below have not been updated
-to reflect. Full narrative, every measurement, and what's still open:
-`PROGRESS.md` §25.
-
 ---
 
 ## 1. What the system is

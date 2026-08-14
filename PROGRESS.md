@@ -1879,31 +1879,42 @@ unrelated verse** (e.g. "and thou shall rule over him" alone → Leviticus
 The obvious fix (let semantic search consider the previous utterance) is
 structurally the rolling-context-blending design §20b already tried and
 removed for causing real false positives from unrelated adjacent
-utterances — not reopened blindly. Instead, a narrow, deterministic
-signal: `transcriber.py`'s `_finalize_soft_cut` (the `max_utterance_seconds`
-forced-cut path) now flags whichever utterance consumes its carried-over
-audio as `last_continues_previous = True` — not a time-based guess, a
-fact the transcriber genuinely knows (no pause occurred). Threaded
-through `main_ui.py`'s `ASRWorker._on_text` into `hybrid.py`'s
-`process(text, continues_previous=...)`, which — only for the semantic
-path, only when flagged — searches the combined (previous + current)
-text instead of the fragment alone.
+utterances — not reopened blindly. Built and verified a narrow,
+deterministic version instead: `transcriber.py`'s `_finalize_soft_cut`
+(the `max_utterance_seconds` forced-cut path) flagged whichever
+utterance consumed its carried-over audio (`last_continues_previous`) —
+not a time-based guess, a fact the transcriber genuinely knows (no
+pause occurred) — threaded through `main_ui.py`'s `ASRWorker._on_text`
+into `hybrid.py`'s `process(text, continues_previous=...)`, which, only
+for the semantic path and only when flagged, searched the combined
+(previous + current) text instead of the fragment alone. Confirmed
+working before it shipped: the reproduced case resolved to Genesis 4:7
+(0.606, `source_text` honestly showing the full combined sentence)
+instead of the wrong isolated match, with `accuracy_eval` unchanged.
 
-Verified: the exact reproduced case now resolves to Genesis 4:7 (0.606,
-`source_text` honestly shows the full combined sentence) instead of the
-wrong isolated match; flag propagation confirmed mechanically through
-the real segmentation code (no real audio needed); `accuracy_eval`
-unchanged.
+**Reverted by direct operator edit before this session's commit** — the
+same "I like the way the transcriber was before" preference that
+applied to the latency constants (25e) was extended to this change too.
+`transcriber.py`/`hybrid.py` are back to not tracking or combining
+across a forced split at all; `main_ui.py`'s callback wiring was
+adjusted to match (it briefly called `process()` with an argument that
+no longer existed, caught and fixed before commit). The false-positive
+risk demonstrated above (a fragment split mid-paraphrase scoring
+confidently on a wrong verse) is real and still open in the shipped
+code. Kept this narrative rather than deleting it — the fix was real,
+tested, and working, and is documented here in case it's worth
+revisiting, not because it's currently live.
 
-**Disclosed limitation, not fixed**: only covers the *second* fragment.
-If the *first* half alone already produces a confident wrong match
-before any split is even known about (also observed: "God said to
-moses" alone → wrongly Exodus 3:4), this doesn't prevent that — though
-`_display()`'s existing duplicate-key skip means the correct combined
-match from the second half still overwrites the wrong one moments
-later. Fixing the first-half case would mean delaying a decision until
-seeing whether more speech follows, i.e. reintroducing the grace-period
-architecture already removed for other reasons.
+**Known limitation the fix itself would have had, even if kept**: only
+covers the *second* fragment. If the *first* half alone already
+produces a confident wrong match before any split is even known about
+(also observed: "God said to moses" alone → wrongly Exodus 3:4), this
+wouldn't have prevented that — though `_display()`'s existing
+duplicate-key skip means a correct combined match from the second half
+would still overwrite a wrong first-half one moments later. Fixing the
+first-half case would mean delaying a decision until seeing whether
+more speech follows, i.e. reintroducing the grace-period architecture
+already removed for other reasons.
 
 ### 25e. `transcriber.py`: latency — measured, not guessed
 
@@ -1958,3 +1969,51 @@ because the measurement didn't support it:
   service recording.
 - Whether the stress/generalization accuracy drop noted above needs
   attention — a separate, real, open question from this session's fixes.
+
+### 25f. Merging with unpushed remote work before committing
+
+Before pushing, `git push` was rejected — the remote (`origin/main`) had a
+real commit (`9b274ac`, 2026-08-10) this local checkout never had: Twi
+ASR backends (Khaya API + an offline w2v-bert fallback), fuzzy Twi
+reference matching, and — notably — the Twi semantic-search guard that
+25a's own "known open item" flagged as apparently missing. It wasn't
+missing; it existed on the remote the whole time, just never pulled
+into this checkout before today's changes were made on top of the old
+base.
+
+`git merge origin/main` auto-resolved cleanly for `reference_extractor.py`,
+`semantic.py`, `main_ui.py`, and `requirements.txt`; one real conflict
+in `transcriber.py`, resolved by keeping both sides (the cloud warm-up
+method and the new Khaya/w2vbert backend-init methods are unrelated
+code that happened to land at the same insertion point).
+
+**Two real problems the clean auto-merge caused, found only by checking,
+not by trusting "no conflict markers = safe"**:
+1. `main_ui.py`'s auto-merge silently dropped this session's
+   `continues_previous` wiring in `_on_text` with no conflict flagged at
+   all — the remote's restructuring of `ASRWorker` (new backend/language
+   params for the Twi engine selector) touched the same function closely
+   enough to overlap, but not in a way git's line-based merge considered
+   a real conflict. Moot in the end (25d's feature was reverted by
+   direct edit anyway), but confirms clean auto-merges in this codebase
+   still need per-function verification, not just a green merge exit
+   code.
+2. `requirements.txt`'s merge pulled in `rapidfuzz>=3.0.0` as a new
+   dependency, but it was never installed in this local `venv311` —
+   `app/retrieval/reference_extractor.py` (and therefore `hybrid.py`,
+   and therefore the entire app) failed to import at all until it was.
+   A clean `git merge` does not mean a working environment.
+
+Also added a fourth semantic entry point's worth of Twi gating:
+`search_within_book()` (new this session, 25b) was written before this
+merge and had no Twi guard — the other three entry points
+(`search`/`search_within_chapter`/`search_top_k`) do, per the remote's
+commit. Added the same guard for consistency, same pattern, same reason.
+
+**Verification**: `py_compile` clean on every touched file after the
+merge; `rapidfuzz` installed and import confirmed working;
+`accuracy_eval` unchanged (87.0%) and `version_detector` self-tests
+(31/31) re-run against the fully merged code; every fix from 25a-25c
+re-spot-checked against the real `HybridEngine` post-merge and still
+correct (event_map similarity gate, nav confirm-gate, Twi block via the
+new `search_within_book` guard).

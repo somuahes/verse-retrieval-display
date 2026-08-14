@@ -8,6 +8,26 @@ faster-whisper>=1.0.0       # Drop-in whisper replacement; 2-4x faster on CPU
 groq>=0.11.0                # Optional: cloud Whisper fallback (transcriber.py's
                             # backend="auto"/"cloud") for machines with no usable
                             # GPU. Not needed if you'll only ever run local/CPU.
+requests>=2.31.0            # Khaya API calls (transcriber.py's backend="khaya",
+                            # the Twi/Ghanaian-language ASR path). Also pulled in
+                            # transitively by huggingface_hub, but now a direct
+                            # dependency of our own code too.
+# ctranslate2 is already pulled in transitively by faster-whisper, but
+# transcriber.py's backend="w2vbert" (free, fully offline Twi ASR
+# fallback for when Khaya is unavailable -- 73.6% WER measured,
+# meaningfully worse than Khaya, not a primary choice) uses its
+# Wav2Vec2Bert model class directly, so it's a direct dependency now
+# too -- measured ~2x faster than the plain-ONNX version this replaced
+# (~5.9s vs. ~13s average per 7s clip on this project's own hardware).
+transformers>=4.30.0        # AutoProcessor for the same backend="w2vbert" path
+                            # (also already required by sentence-transformers
+                            # below, but now a direct dependency too).
+rapidfuzz>=3.0.0            # reference_extractor.py's fuzzy book-name/structural-
+                            # word fallback -- catches ASR garbling exact-match
+                            # lookup misses (e.g. "gyenisis" for "gyenesis"),
+                            # deliberately conservative on threshold (see
+                            # _fuzzy_lookup's docstring for the false-positive
+                            # investigation behind the exact numbers used).
 
 # --- Audio I/O ---
 sounddevice>=0.4.6          # Cross-platform microphone input

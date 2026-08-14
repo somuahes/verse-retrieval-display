@@ -1461,3 +1461,500 @@ exact caveat.
 - Semantic/topic search parity for Twi — root cause identified (English-
   only embedding model), fix scoped (multilingual model swap + full
   reindex), explicitly deferred by the operator.
+
+---
+
+## 22. Operator Panel: Browse, Session History, Queue reorder/save-load, Save-Image, a shared visual identity, and a first real integration test suite
+
+Asked for a set of BibleShow-inspired Operator Panel features, a visual
+polish pass, and — mid-session — that the frontend stay cleanly segregated
+from the backend "if it is safe." All four features below are additive to
+the UI layer only; **`HybridEngine`'s matching/decision logic was not
+touched**, and neither were `app/asr/transcriber.py`, `aliases_en.py`, or
+`semantic.py` (all three had the operator's own local, uncommitted changes
+already in progress when this session started — left alone throughout).
+
+**Frontend/backend line, drawn explicitly rather than assumed safe**: a
+literal network split (UI talking to the engine over HTTP/IPC) was
+considered and rejected — this app's value is sub-second latency between
+speech and a verse landing on screen, and a network hop risks exactly
+that. What was enforced instead: `app/ui` never contains SQL or matching
+logic. The Browse panel needed three new queries — `db_list_books`,
+`db_chapter_count`, `db_get_chapter` — all added to `hybrid.py` (existing
+precedent: the file already hosts `db_get_verse`/`db_get_next_verse`/etc.
+as thin query wrappers alongside `HybridEngine`), not written as raw SQL
+inside `browser_window.py`. Queue save/load was similarly extracted from
+an inline UI click-handler into `app/ui/queue_store.py` — plain functions
+with no Qt dependency, specifically so they're testable without driving a
+real file-picker dialog. `theme_store.py` already established this exact
+pattern for the Theme Designer; both new modules just extend it.
+
+### What was built
+
+- **Queue reorder + save/load** (`main_ui.py`) — ▲/▼ per row; Save…/Load…
+  persist to a JSON program-list file under a new `programs/` folder.
+  Saved entries keep only `book/chapter/verse/version/text`, deliberately
+  dropping session-only fields like `confidence`/`match_type` that
+  wouldn't mean anything on reload.
+- **Save current slide as image** (`main_ui.py`) — grabs the live
+  `DisplayWindow` via `QWidget.grab()`, saves to PNG.
+- **Session History window** (new `app/ui/history_window.py`) — every
+  verse actually pushed to `_set_live()`, not just detected — distinct
+  from the AI Detections panel (capped at 30, includes verses never sent
+  live). Refresh / Export (JSON, CSV, or TXT) / Clear.
+- **Browse window** (new `app/ui/browser_window.py`) — three-pane
+  Books → Chapters → Verses click-through, reusing the ▶/+ send-to-
+  Preview/add-to-Queue pattern already established by AI Detections and
+  Search results. Wired into `main_ui.py` via the same signal pattern as
+  Search (`_promote_search_result`/`_add_to_queue`), not a new code path.
+- **Shared visual identity** (new `app/ui/style_kit.py`) — the dark/gold
+  palette and QSS helpers already living inline in `main_ui.py`, factored
+  into one module and applied to both new windows plus the existing
+  History window, so the app has one consistent identity across windows
+  instead of each one styling itself independently. A generated app icon
+  (drawn with `QPainter`, no binary asset) is now the window icon
+  everywhere. Deliberately left the Theme Designer on its own plain
+  chrome — a properties-inspector-style tool, matching how it already
+  looked before this session.
+- **Empty-state hints** on AI Detections and Queue, instead of a blank
+  panel when nothing's there yet.
+
+### A real bug found while inserting the empty-state hints
+
+Adding a permanent hint widget at layout index 0 in both the Detections
+and Queue panels silently broke two pieces of existing index-based logic
+that assumed no such widget existed:
+- Detections' card-pruning (`_add_detection_card`) read
+  `self._det_layout.count() - 2` to find the oldest surviving card to
+  delete once the 30-card cap is exceeded — with the hint now occupying
+  that slot, it would have deleted the hint itself the first time pruning
+  ever ran, not a card. Fixed by shifting the index by one
+  (`count() - 3`) and documenting why in a comment.
+- Queue's `_remove_queue_item`/`_move_queue_item` both read a widget's
+  position via `self._queue_layout.indexOf(item_widget)` and used it
+  directly as an index into `self._queue` — off by one now that the
+  hint occupies layout index 0. Fixed by subtracting 1 at both call
+  sites.
+
+Caught by the integration test suite (below), not by manual inspection —
+`test_detections_empty_hint_and_prune_window` and the Queue reorder/
+remove tests failed against the first version of this code, which is
+exactly what they were written to catch.
+
+### Test suite — new `tests/` (39 cases, 4 files) + root `conftest.py`
+
+- `tests/test_db_helpers.py` — the three new Browse queries, against the
+  real `bible.db` (canonical book order, known chapter counts per book,
+  verse ordering, Psalm/Psalms aliasing).
+- `tests/test_queue_store.py` — save/load JSON round-trips, confirms
+  ephemeral fields don't survive to disk.
+- `tests/test_browser_window.py` — Browse in isolation: book → chapter →
+  verse click-through, version switching, ▶/+ signal payloads.
+- `tests/test_operator_integration.py` — the full Operator Panel against
+  the real engine: Queue add/reorder/remove/clear + the empty-state hint,
+  History logging + all three export formats, Save-Image producing a real
+  PNG, Browse wired through to Preview and Queue, and the Detections
+  pruning fix above.
+
+**A genuine Windows-specific bug the test suite surfaced, unrelated to
+the app's own logic**: running the full suite (multiple files in one
+pytest process) failed importing torch with `WinError 1114`, while
+running any single file alone succeeded. Root cause: `main_ui.py` already
+imports the torch-dependent retrieval stack *before* PyQt5, for a reason
+its own comment names ("Fix DLL loading on paths with spaces") — Windows
+DLL search order is load-order-sensitive, and whichever of PyQt5's or
+torch's bundled runtime DLLs loads into the process first determines
+whether the other's load later succeeds. Test files don't all import in
+that same order, and pytest collects several into one process. Fixed in
+`conftest.py`: `import app.retrieval.hybrid` (forcing torch to load)
+right after the existing DLL-directory fix, before pytest imports any
+test module — the one ordering guarantee that holds regardless of how
+individual test files are written.
+
+### Verification
+
+- `venv311\Scripts\python.exe -m pytest tests/ -v`: **39 passed**, 0
+  failed, run three times consecutively for stability.
+- `venv311\Scripts\python.exe -m app.evaluation.accuracy_eval`: 87.0%
+  exact-match (100.0% direct, n=10; 76.9% semantic, n=13), 0.0%
+  false-positive rate, 13.0% no-match rate, on the current 32-case
+  starter set. **This is not a regression from this session** — this
+  session added zero lines to any matching/threshold/priority code path
+  (only new, standalone `db_*` query functions). Two of the three misses
+  (Deuteronomy 31:6, Philippians 4:19) are the exact cases already
+  documented as a known, deliberately-unfixed issue in §20c
+  (`SEMANTIC_CONFIDENCE_HI` blocking a cross-book topic change); the
+  third (Romans 7:23) and the overall number also reflect whatever
+  in-progress, uncommitted state `aliases_en.py`/`semantic.py` are
+  currently in on this machine (the operator's own work, not this
+  session's) — this run should not be read as this session's own
+  accuracy baseline the way §18/§20a's numbers were.
+- `venv311\Scripts\python.exe -m app.evaluation.latency_bench`: semantic
+  search 34.46ms mean / 17.31ms median (n=32, text-only cases) — well
+  inside the ~3s budget from §11, consistent with prior sessions' numbers,
+  no evidence of a regression.
+- `py_compile` clean on every new/changed file.
+
+### Not verified
+
+- No real live run — everything above was driven programmatically
+  (offscreen Qt, real engine and database, but no actual microphone
+  input, no human clicking through the projector output on a second
+  screen). The operator should click through Browse/History/Queue
+  save-load/Save-Image at least once in a normal windowed run before
+  relying on them live.
+- Whether the current 87.0%/76.9% accuracy state (pre-existing, not
+  introduced here) needs attention is a separate, open question from this
+  session's UI work — flagged, not investigated, since it wasn't this
+  session's scope and touches files with the operator's own in-progress
+  changes.
+
+---
+
+## 23. A real windowed run — three bugs the offscreen test suite structurally could not have caught
+
+Direct follow-up to §22's "not verified" note: the operator pointed out
+that everything in §22 was driven offscreen. Launched the actual app for
+real this time — real Qt `"windows"` platform (confirmed via
+`app.platformName()`), a real `HybridEngine`/`bible.db`, real window
+paint — clicked through Browse → Genesis 1 → Preview → Go Live → the real
+projector Display → Session History → Save Image → Queue save/load/
+reload, screenshotting each step. Two capture methods were used and
+cross-checked against each other: `QWidget.grab()` (off-compositor
+render) and `QScreen.grabWindow()` (true on-screen capture) — both agreed
+on every finding below, which is what ruled out "capture-method artifact"
+as an explanation before treating anything as a real bug.
+
+**Same DLL-load-order issue as §22, in a different script**: the first
+attempt imported `PyQt5.QtWidgets` before `app.retrieval.hybrid` and hit
+the identical `WinError 1114`. Fixed the same way — torch loaded first.
+Noting this again because it's now the second time this exact ordering
+requirement has bitten a from-scratch script; anything that launches this
+app programmatically needs it.
+
+### Bug 1: `DisplayWindow.launch()` opened at 203×318, not the intended 960×540
+
+`launch()`'s existing guard (`if self.width() <= 1 or self.height() <= 1:
+resize to DEFAULT_SIZE`) assumed a never-shown top-level widget reports a
+near-zero size before `show()`. On the real `"windows"` platform it
+doesn't — measured **203×318** immediately after `launch()` returned, a
+small portrait-ish window, not the intended 960×540 landscape default.
+(The offscreen test suite never exercises this exact path — every
+existing test that needs a specific `DisplayWindow` size calls
+`resize(*DisplayWindow.DEFAULT_SIZE)` explicitly first, which happens to
+paper over exactly this gap.) **Fix**: replaced the size-based guard with
+an explicit `self._ever_launched` flag set on first `launch()` — resize
+to default only once per session, regardless of what Qt reports as the
+pre-show size. Re-ran: confirmed 960×540 exactly.
+
+### Bug 2: the topbar silently clipped the app's own title
+
+`OperatorWindow` still had `setMinimumSize(1300, 760)` / `resize(1440,
+860)` from before §22 added the History and Browse buttons. Real screen
+capture showed the title truncated to "VERSE RETRII", the subtitle cut
+to "Sermon Intelligenc", and the three theme-toggle icon buttons squeezed
+to sliver width. **Measured rather than guessed**: walked the topbar's
+own `QHBoxLayout` and read `topbar.minimumSizeHint().width()` directly —
+**1650px**, comfortably more than either the old minimum or default.
+**Fix**: `setMinimumSize(1680, 760)` / `resize(1750, 860)`, with a
+comment naming the measured number so the next added topbar button has
+something concrete to check against instead of re-discovering this by
+screenshot again.
+
+### Bug 3: "Push to Live →" and "Save Image" rendered with doubled/garbled text
+
+Both buttons showed what looked at first like an overlap bug — button
+text partly illegible, e.g. "Push to Live →" reading like "Hush to
+Live". Ruled out layout/positioning first (this session's own habit of
+measuring, not assuming): walked both header rows' actual computed
+`QRect` geometry — every visible widget's rect was correctly non-
+overlapping. Ruled out `QGraphicsDropShadowEffect` next (the §22 card
+shadows) — the Live Output card has no shadow effect at all and showed
+the identical artifact, so that was never the cause. Grabbed the button
+in total isolation (no parent, no siblings) — artifact still present,
+confirming it was intrinsic to the button's own paint, not a compositing
+interaction. **Root cause, found by comparing against every other button
+in the app**: both were the only two buttons combining `setFixedHeight(22)`
+with a real multi-word text label — `btn_qss()`'s `8px 16px` padding plus
+a normal line-height needs more like ~33px; every other button either
+uses a taller fixed height (topbar buttons: 32px) or a single glyph
+(▶/+/✕/▲/▼ at 22px, which have no ascender/descender complexity to clip).
+**Fix**: both bumped to `setFixedHeight(26)`. Confirmed clean text in a
+true `QScreen.grabWindow()` capture, not just `grab()`.
+
+### Also observed, deliberately not touched
+
+The three theme-toggle icon buttons (🌙/☀️/⚙) render as unrecognizable
+glyph fragments in a true screen capture, at a comfortable 32×32 size —
+a real rendering issue, but in code untouched this session (predates
+§22) and specific to those exact three characters (⚡, 🖼, 📖, 🕘, and ✦
+all render correctly at similar or smaller sizes elsewhere in the same
+screenshots) — most likely a font-coverage gap for those specific
+codepoints on this machine, not a sizing/layout bug like the three above.
+Flagged for the operator rather than fixed, since it's pre-existing and
+outside this session's actual scope.
+
+### Verification
+
+- `venv311\Scripts\python.exe -m pytest tests/ -v`: **39 passed**, re-run
+  after both `display_window.py` and `main_ui.py` changes — no
+  regression.
+- Full real-windowed drive-through re-run after all three fixes: Display
+  opens at 960×540; Browse → Genesis 1 → Preview → Go Live → real
+  projector text confirmed as `'In the beginning God created the heaven
+  and the earth.'` (not empty, not stale); Session History shows the
+  correct row after a real live push; Save Image produces a real,
+  non-trivial PNG (23,431 bytes); Queue save → clear → reload from disk
+  round-trips two real verses correctly, screenshotted at each step.
+- Every finding above was cross-checked between `QWidget.grab()` and
+  `QScreen.grabWindow()` before being treated as real — this is what
+  ruled out "artifact of the capture method" for the button-text bug
+  before spending time on a fix.
+
+---
+
+## 24. Browse and History stopped opening as separate windows
+
+Feedback after §23: a whole new OS window per feature is more clicks and
+context-switching, not less — not how BibleShow keeps its panels
+together. Converted both from popup `QMainWindow`s into panels embedded
+in the Operator Panel's own window, toggled by their existing topbar
+buttons, one at a time, in a 4th slot on the main `QSplitter` — chosen
+over always-visible (not enough width for Browse's three sub-panes plus
+the existing three columns) and over folding them into tabs (loses
+"see Detections and Browse at once," and this keeps today's layout
+untouched when neither is open).
+
+**`app/ui/browser_window.py`**: `BrowserWindow(QMainWindow)` →
+`BrowsePanel(QWidget)` — same Books/Chapters/Verses UI, no
+`setCentralWidget`/window chrome, plus a `closed` signal wired to a new
+✕ button so it can be dismissed without touching the topbar. Same change
+to **`app/ui/history_window.py`** (`HistoryWindow` → `HistoryPanel`).
+
+**`app/ui/main_ui.py`**: topbar buttons now call `_toggle_browse()`/
+`_toggle_history()` instead of opening a window. `_show_aux(kind)`
+attaches the requested panel to the main splitter (creating it once,
+lazily) and widens the window by the panel's own width so the existing
+three columns don't get squeezed; `_close_aux()` reverses it. Opening one
+while the other is showing swaps the slot's contents without resizing
+again. Panel instances persist in `self._browse_panel`/
+`self._history_panel` across open/close so reopening keeps prior state
+(selected book/chapter, table rows).
+
+**Bug found via a real windowed run, not the offscreen suite**: theme
+switching (`_refresh_styles()`) rebuilds the entire splitter tree from
+scratch. The first version of this fix nulled out `_browse_panel`/
+`_history_panel` before the rebuild (to avoid touching a reference about
+to be `deleteLater()`'d) and let `_show_aux` lazily recreate them
+afterward — mechanically safe, but silently discarded the operator's
+in-progress Browse selection on every theme toggle. Screenshotted before
+and after a real `_switch_theme("light")` call: book/chapter printed
+`None None` post-switch where it should have read `Genesis 1`. **Fix**:
+detach the panel (`setParent(None)`) *before* the old central widget is
+torn down, so the same instance survives instead of being recreated —
+reattach it afterward. Re-verified: `Genesis 1` intact after a real theme
+switch, confirmed by both the printed state and the screenshot.
+
+**Also observed while verifying this**: the actual test screen is only
+~1536 logical px wide, narrower than `1750 (base) + 650 (Browse
+PANEL_WIDTH)`. Windows caps the requested resize to fit, so on a screen
+this size the AUX panel ends up narrower than its nominal 650px. Checked
+the resulting screenshot rather than assuming this breaks anything — the
+three sub-panes (via their own `QScrollArea`/`QListWidget`) degrade
+gracefully to the available width; text stays legible, nothing clips or
+overlaps. Left as-is: capping resize requests to `screen.availableGeometry()`
+explicitly would avoid ever asking for more than fits, but there's no
+observed breakage to justify it yet.
+
+### Verification
+
+- `venv311\Scripts\python.exe -m pytest tests/ -v`: **42 passed** (39
+  from before + 3 new: open/close toggle, Browse↔History swap exclusivity,
+  and state survival across `_refresh_styles()`).
+- Real windowed run (`QScreen.grabWindow()`, not offscreen): opened
+  Browse (window widened, 3 original columns un-squeezed, Browse
+  rendered in the app's dark/gold identity) → swapped to History in the
+  same slot (no extra resize) → closed (window narrowed back to its
+  minimum) → reopened Browse, selected Genesis 1, switched theme to
+  light (main window's cards turned light — confirmed by sampled pixel
+  RGB matching `THEMES["light"]` exactly, not just eyeballed — Browse's
+  own panel correctly stayed on its fixed dark identity per
+  `style_kit.py`) → confirmed Genesis 1 still selected → closed via the
+  panel's own ✕ button, not the topbar toggle.
+
+---
+
+## 25. Session — 2026-08-14: three real false-positive classes found and fixed, split-utterance matching, latency work, cloud warm-up
+
+A long, live-testing-driven session. Ground rule kept throughout: every
+fix traces to a reproduced, measured case (real "heard:" text from the
+AI Detections panel, or a constructed test against the real engine) —
+nothing here was guessed at or changed on theory alone.
+
+### 25a. `semantic.py`: phrase_map/event_map false 100% confidence
+
+`_map_search` (curated famous-phrase/named-event shortcuts) matched by
+plain substring containment and always reported `final_score=1.0`
+unconditionally — no check on whether the matched phrase was actually
+what the utterance was about.
+
+- **`phrase_map`**: new `PHRASE_MAP_COVERAGE_MIN = 0.35` gate — the
+  matched phrase must cover at least 35% of the utterance's content
+  words. Chosen empirically: measured coverage ratio for every
+  currently-correct phrase_map hit across all three test sets; the
+  lowest genuine one is 0.40 ("move a mountain" in "if you have faith
+  you can move a mountain"). 0.35 sits under that with margin.
+- **`event_map`**: coverage alone broke real cases (a 2-word event name
+  like "prodigal son" is legitimately a small fraction of the narrative
+  sentence around it — confirmed the statistical path can't find Luke
+  15:11 on its own as a fallback either). Instead, the 11 single-word
+  event_map entries (`creation`, `resurrection`, `crucifixion`,
+  `ascension`, `goliath`, `pentecost`, `passover`, `nativity`,
+  `beatitudes`, `transfiguration`, `gethsemane`) now require a real
+  embedding-similarity check against the matched verse's own text.
+  Root-caused against a real reported case: "you are a new creation"
+  (Pauline theology) was matching Genesis 1:1 via the bare word
+  "creation" alone. Multi-word event entries stay unconditional.
+- CPU thread bounding (`torch.set_num_threads(4)`) — embedding inference
+  was contending with faster-whisper's decode threads for the same
+  cores. Verified accuracy-neutral (identical eval numbers); latency
+  benefit unproven by any test available (the harness can't simulate
+  concurrent ASR-decode load).
+
+**Known open item, not fixed**: `search()`/`search_within_chapter()`/
+`search_top_k()` no longer have the Twi-only guard documented in
+SYSTEM_DOCUMENTATION.md §3.2/§5 (Twi semantic search should be blocked —
+English-only embedding model). Flagged to the operator, left as-is by
+their own choice.
+
+### 25b. `hybrid.py` + `reference_extractor.py`: book named, no chapter given
+
+"In the book of Romans, he talks about how we should not think of
+ourselves more highly than we ought" fell through to an unscoped,
+whole-Bible search with "Romans" carrying zero weight — `extract_reference`/
+`extract_reference_verbose` need a chapter number to return anything at
+all. New `extract_book_only()` (reuses the existing alias-scanning
+table, just drops the "must be followed by a number" requirement) +
+new `SemanticEngine.search_within_book()` (mirrors `search_within_chapter`,
+no chapter filter), wired into `hybrid.py` right after the existing
+direct-reference step. Verified against the real `HybridEngine`: now
+resolves to Romans 12:3; a bare "let's go to the book of Romans" still
+correctly finds nothing.
+
+### 25c. `aliases_en.py` + `version_detector.py` + `hybrid.py`: ordinary preaching speech triggering navigation
+
+Reported live: normal preaching (not referring to a verse) was silently
+moving the display back a verse. Traced to `NAV_MAP`'s `"go back": "PREV"` —
+matched by plain word-boundary substring search, no context check.
+Reproduced directly: "I want you to go back in your minds to when you
+first met Jesus" → `PREV`, on every tested ordinary sentence. Also found
+the same class of bug on `"go to next"`, `"go to previous"`, `"read
+again"`, `"read that again"`, `"say that again"`.
+
+- Removed the four with no existing safety mechanism (`go to next`,
+  `read again`, `read that again`, `say that again`) — each had a more
+  distinctive, "verse"-qualified equivalent already in the map, so
+  nothing real is lost.
+- `"go back"`/`"go to previous"` were kept, but properly wired to an
+  existing, never-connected mechanism: `version_detector.py` already had
+  `nav_requires_confirm()`/`PREV_CONFIRM_PHRASES`, built for exactly this
+  ambiguity (its own self-test suite even asserted the expected
+  behavior) but never called from `hybrid.py`. Wired it up: new
+  `AMBIGUOUS_NAV_CONFIRM_WINDOW = 8.0`s and `_pending_ambiguous_nav`
+  state — an ambiguous phrase now only fires PREV if it's said twice
+  within the window; a single rhetorical mention is silently ignored.
+  `version_detector.py`'s own self-test suite: 29/31 → **31/31**.
+
+### 25d. `hybrid.py` + `transcriber.py` + `main_ui.py`: split-utterance semantic false positives
+
+Asked directly whether the transcriber still splits utterances, and to
+fix it if the disadvantages outweigh the advantages. Tested by splitting
+three real semantic test cases roughly where a natural pause would
+land, mid-paraphrase, and searching each half independently against the
+real engine — confirmed a genuinely worse failure mode than a miss: a
+fragment split mid-sentence can score **confidently on a wrong,
+unrelated verse** (e.g. "and thou shall rule over him" alone → Leviticus
+25:43 at 0.71, when the full sentence → Genesis 4:7).
+
+The obvious fix (let semantic search consider the previous utterance) is
+structurally the rolling-context-blending design §20b already tried and
+removed for causing real false positives from unrelated adjacent
+utterances — not reopened blindly. Instead, a narrow, deterministic
+signal: `transcriber.py`'s `_finalize_soft_cut` (the `max_utterance_seconds`
+forced-cut path) now flags whichever utterance consumes its carried-over
+audio as `last_continues_previous = True` — not a time-based guess, a
+fact the transcriber genuinely knows (no pause occurred). Threaded
+through `main_ui.py`'s `ASRWorker._on_text` into `hybrid.py`'s
+`process(text, continues_previous=...)`, which — only for the semantic
+path, only when flagged — searches the combined (previous + current)
+text instead of the fragment alone.
+
+Verified: the exact reproduced case now resolves to Genesis 4:7 (0.606,
+`source_text` honestly shows the full combined sentence) instead of the
+wrong isolated match; flag propagation confirmed mechanically through
+the real segmentation code (no real audio needed); `accuracy_eval`
+unchanged.
+
+**Disclosed limitation, not fixed**: only covers the *second* fragment.
+If the *first* half alone already produces a confident wrong match
+before any split is even known about (also observed: "God said to
+moses" alone → wrongly Exodus 3:4), this doesn't prevent that — though
+`_display()`'s existing duplicate-key skip means the correct combined
+match from the second half still overwrites the wrong one moments
+later. Fixing the first-half case would mean delaying a decision until
+seeing whether more speech follows, i.e. reintroducing the grace-period
+architecture already removed for other reasons.
+
+### 25e. `transcriber.py`: latency — measured, not guessed
+
+Asked to reduce latency; findings were measured before anything was
+changed, and one planned change (lowering `beam_size`) was dropped
+because the measurement didn't support it:
+
+- `beam_size` 5 vs 4 vs 3, 4 runs each on the real local `base.en`
+  model: 938ms / 983ms / 880ms — no consistent ordering, noise. Left at
+  5 (its real, documented accuracy cost bought no measured speed here).
+- `endpoint_silence_ms`: 350 → **250ms**, `short_utterance_grace_ms`:
+  700 → **500ms** (same ratio kept). The one lever that's real and
+  deterministic, not noise — every utterance pays this in full before
+  decode starts.
+- Root-caused a reported "it waits for something" complaint: the first
+  Groq cloud request on a fresh connection pays a real, measured
+  connection-setup cost (585-1337ms observed on identical audio) that
+  later requests don't (settles to ~440-650ms). Fixed with
+  `_warm_up_cloud_connection()` — one throwaway request fired during
+  `_init_cloud_backend()`, at startup, before the operator is even
+  listening, so that cost never lands on a live utterance again.
+  Confirmed: first *real* decode after the warm-up call measured 651ms,
+  in the normal range instead of the cold-start spread.
+- Also measured and rejected: `whisper-large-v3-turbo` vs the current
+  `whisper-large-v3` — 457ms vs 464ms once warm, no real difference:
+  current model choice stays.
+
+### Verification (25a-25e)
+
+- `py_compile` clean on every changed file.
+- `accuracy_eval.py` (starter set): 87.0% / 100.0% direct / 76.9%
+  semantic / 0.0% FP — identical before and after every change in this
+  session, confirmed by isolating each fix individually (e.g. the
+  phrase_map coverage gate was forcibly disabled and re-tested to prove
+  it wasn't responsible for a separate, pre-existing accuracy gap found
+  along the way — see below).
+- **Real, pre-existing finding, not caused by this session**: the
+  stress test set (55 cases) measured **74.5%** against a documented
+  historical baseline of 81.8%; the generalization set (31 cases)
+  measured **64.5%** against a documented 77.4%. Confirmed via an
+  isolated A/B test (coverage gate forcibly disabled, identical numbers
+  either way) that this session's changes are not the cause — most
+  likely the operator's own in-progress local edits to `semantic.py`/
+  `aliases_en.py` that pre-date this session. Flagged as open, not
+  investigated further here.
+
+### Not verified
+
+- All ASR-side timing changes (25d, 25e) against real recorded audio —
+  same recurring gap as every previous session. Verified mechanically
+  and against the real engine with real text, not against a real
+  service recording.
+- Whether the stress/generalization accuracy drop noted above needs
+  attention — a separate, real, open question from this session's fixes.

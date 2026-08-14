@@ -54,6 +54,7 @@ class DisplayWindow(QWidget):
         self._theme = Theme()
         self._bg_pixmap = None
         self._is_fullscreen = False
+        self._ever_launched = False
         self._setup_window()
         self._setup_layout()
         # NOTE: do NOT call show()/showFullScreen() here.
@@ -82,8 +83,17 @@ class DisplayWindow(QWidget):
         enter_fullscreen() separately once it's positioned on the actual
         projector screen.
         """
-        if self.width() <= 1 or self.height() <= 1:
+        if not self._ever_launched:
+            # Force the intended default only on the very first open of a
+            # session — a never-shown top-level widget's width()/height()
+            # aren't reliably near-zero before show() (confirmed live: a
+            # real "windows"-platform run measured 203x318 here, not the
+            # ~0 this used to assume), so a size check can't tell "never
+            # positioned" apart from "genuinely small." A one-time flag
+            # can. Once launched, later calls respect whatever size the
+            # operator left it at (including a manual resize).
             self.resize(*self.DEFAULT_SIZE)
+            self._ever_launched = True
 
         # Windowed mode has no "always on top" hint, so without an explicit
         # raise it can silently open *behind* the operator window on a

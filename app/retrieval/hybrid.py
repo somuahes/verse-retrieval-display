@@ -45,11 +45,13 @@ from app.retrieval.version_detector import (
     detect_version,
     detect_navigation,
     detect_verse_jump,
+    nav_requires_confirm,
     SessionState,
 )
 from app.retrieval.reference_extractor import (
     extract_reference,
     extract_reference_verbose,
+    extract_book_only,
     strip_reference_words,
 )
 
@@ -86,59 +88,48 @@ TRACKING_TIMEOUT = 30
 # double-click still works.
 VOICE_NAV_COOLDOWN = 2.5
 
-# Matches semantic.py's own DISPLAY_THRESHOLD (Rule 1's final-score bar).
-# Previously 0.53 — independently tuned from semantic.py's 0.50 with no
-# documented reason for the gap, and it caused real misses: semantic.py's
-# search() already runs its own careful Rule 1/Rule 2 decision (see its
-# docstring) and only returns a candidate that clears it, so re-checking
-# against a DIFFERENT, stricter number here means a candidate semantic.py
-# itself considers a genuine match can still get silently discarded.
-# Confirmed on a real, previously-failing eval case: "nothing can
-# separate us from the love of God" -> Romans 8:35 scores final=0.529 in
-# semantic.py (clears its own Rule 1 at >=0.50) but was being rejected
-# here for missing the old 0.53 bar by 0.001. If hybrid-level strictness
-# beyond semantic.py's own threshold is wanted again later, it needs its
-# own documented rationale, not an accidental gap between two numbers
-# tuned separately in two files.
-SEMANTIC_CONFIDENCE = 0.55
-# Applies only to matches that would take the display OUT of the book
-# currently locked on screen while ACTIVELY SEQUENTIAL (session.state ==
-# "sequential" — the operator/voice is explicitly walking verse-by-verse
-# through a passage via next/prev/last) — raised well above the base
-# threshold because interrupting a deliberate walk-through needs strong
-# evidence, not a borderline score. A same-book match uses
-# SEMANTIC_CONFIDENCE instead regardless of state (see the "in_context"
-# handling in _run_semantic) — staying in the neighborhood you're already
-# in is a normal, likely-correct continuation either way.
+# Ambiguous PREV phrases ("go back", "go to previous" — see
+# version_detector.py's PREV_CONFIRM_PHRASES/nav_requires_confirm) are
+# common enough in ordinary rhetorical preaching ("go back to what I was
+# saying") that firing on a single mention is a real false-positive risk,
+# confirmed live: it silently jumped the display back a verse on
+# completely non-navigational speech. Genuine navigational intent
+# naturally repeats within a few seconds ("go back... let's go back a
+# verse"); a one-off rhetorical use doesn't. This window is how long a
+# second, matching mention has to arrive before the pending confirmation
+# is dropped — long enough to allow a short pause or an intervening
+# sentence, short enough that it's clearly still "the same moment."
+AMBIGUOUS_NAV_CONFIRM_WINDOW = 8.0
+
+# Matches semantic.py's own DISPLAY_THRESHOLD — must stay equal. A
+# stricter number here would silently re-reject a candidate semantic.py's
+# own Rule 1/Rule 2 already accepted (confirmed live: Romans 8:35 at
+# final=0.529 was wrongly rejected by an old, independently-tuned 0.53).
+SEMANTIC_CONFIDENCE = 0.58
+# Raised bar for a match that would take the display OUT of the book
+# locked on screen while ACTIVELY SEQUENTIAL (walking verse-by-verse via
+# next/prev/last) — interrupting a deliberate walk-through needs strong
+# evidence. A same-book match still uses SEMANTIC_CONFIDENCE regardless
+# of state; see _run_semantic's "in_context" handling.
 #
-# Deliberately NOT keyed off "verse_tracking" (a much broader state that
-# also covers "a single detection was just displayed, nothing sequential
-# is happening"). It used to be, and that was a real bug: a topical
-# sermon that cites one verse per book in quick succession sets
-# verse_tracking after the very first citation and then never leaves it,
-# so every subsequent citation in a different book — the ordinary case
-# for that kind of sermon, not a risky tangent — had to clear this much
-# higher bar for no real reason. Confirmed against a real transcribed
-# sermon: every semantic match in it scored under even the base 0.50, so
-# this specific bug wasn't what blocked those cases, but the general
-# flaw (conflating "one thing was shown" with "actively navigating") is
-# real and would silently bite the moment a paraphrase's score landed in
-# the 0.50-0.72 band while tracking a different book — exactly the shape
-# of the two live-confirmed cases in SYSTEM_DOCUMENTATION.md's known-
-# issues list (Deuteronomy 31:6 @ 0.542, Philippians 4:19 @ 0.549, both
-# wrongly blocked while tracking an unrelated book).
+# Deliberately keyed off "sequential", not the broader "verse_tracking"
+# (also true after a single detection with nothing sequential happening)
+# — that used to be a real bug: a topical sermon citing one verse per
+# book in quick succession sets verse_tracking after the first citation
+# and never leaves it, so every ordinary subsequent citation had to clear
+# this bar for no reason. Known, deliberately unfixed gap from this same
+# state: a genuine cross-book topic change scoring in [0.50, 0.72) is
+# still wrongly blocked (confirmed: Deuteronomy 31:6 @ 0.542, Philippians
+# 4:19 @ 0.549) — see PROGRESS.md §20c for why this wasn't retuned.
 SEMANTIC_CONFIDENCE_HI = 0.72
 
-# Removed: a fixed-size rolling word window (ROLLING_CONTEXT_WORDS = 13)
-# that persisted across utterance boundaries "all the time." Confirmed
-# live it let a stale word from an already-resolved or already-failed
-# utterance silently dilute a later, unrelated utterance's score — see
-# the module docstring above. Semantic search now scopes strictly to the
-# single utterance that triggered it, nothing older.
-
-# whole-utterance granularity, used only by _extract_split_reference
-# (needs the complete previous utterance's text to recombine with the
-# current one, not a word-count window).
+# ROLLING_CONTEXT_SENTENCES: whole-utterance granularity, used only by
+# _extract_split_reference (needs a complete previous utterance to
+# recombine with the current one, not a word-count window). A separate
+# word-count rolling window for semantic search itself was tried and
+# removed — it let a stale word from an already-resolved utterance dilute
+# a later, unrelated one's score; semantic search now scopes strictly to
+# the single utterance that triggered it.
 ROLLING_CONTEXT_SENTENCES = 3
 
 # Metadata-only — a fixed confidence shown for direct-reference detections
@@ -202,18 +193,10 @@ def db_get_verse(
     try:
         with _conn() as c:
             for b in _normalise_book_for_db(book):
-                # Exact equality, not UPPER()/LOWER()-wrapped — version and
-                # book here always arrive already in the DB's own casing
-                # (version via detect_version()'s VERSION_MAP / the
-                # _switch_version().upper() guard; book via
-                # reference_extractor._normalise_book(), which produces the
-                # same Title-Case names the import script wrote). Wrapping
-                # an indexed column in UPPER()/LOWER() stops SQLite from
-                # using idx_lookup(version_id, book, chapter, verse) at all,
-                # forcing a full scan of every verse in the version (~31k
-                # rows) computing LOWER(book) per row for what should be an
-                # index seek — on the hot path for every direct-reference
-                # match and every next/prev/repeat navigation command.
+                # Exact equality, not UPPER()/LOWER()-wrapped — version/book
+                # always arrive in the DB's own casing already, and
+                # wrapping an indexed column stops SQLite using idx_lookup,
+                # forcing a full ~31k-row scan on this hot path.
                 row = c.execute(
                     """
                     SELECT v.book, v.chapter, v.verse, v.text, ver.code AS version
@@ -406,6 +389,77 @@ def db_search_text(
         return []
 
 
+def db_list_books(version: str) -> List[str]:
+    """Books in canonical Bible order (import order — the source JSON
+    files list books Genesis→Revelation, so the lowest row id per book
+    reproduces that order without a hardcoded book list)."""
+    try:
+        with _conn() as c:
+            rows = c.execute(
+                """
+                SELECT v.book
+                FROM verses v
+                JOIN versions ver ON v.version_id = ver.id
+                WHERE ver.code = ?
+                GROUP BY v.book
+                ORDER BY MIN(v.id)
+                """,
+                (str(version),),
+            ).fetchall()
+            return [r[0] for r in rows]
+
+    except Exception as e:
+        log.error("db_list_books: %s", e)
+        return []
+
+
+def db_chapter_count(version: str, book: str) -> int:
+    try:
+        with _conn() as c:
+            for b in _normalise_book_for_db(book):
+                row = c.execute(
+                    """
+                    SELECT MAX(v.chapter)
+                    FROM verses v
+                    JOIN versions ver ON v.version_id = ver.id
+                    WHERE ver.code = ? AND v.book = ?
+                    """,
+                    (str(version), str(b)),
+                ).fetchone()
+                if row and row[0] is not None:
+                    return int(row[0])
+        return 0
+
+    except Exception as e:
+        log.error("db_chapter_count: %s", e)
+        return 0
+
+
+def db_get_chapter(version: str, book: str, chapter: int) -> List[Dict]:
+    """Every verse in a chapter, in verse order — powers the Browser
+    panel's chapter preview."""
+    try:
+        with _conn() as c:
+            for b in _normalise_book_for_db(book):
+                rows = c.execute(
+                    """
+                    SELECT v.book, v.chapter, v.verse, v.text, ver.code AS version
+                    FROM verses v
+                    JOIN versions ver ON v.version_id = ver.id
+                    WHERE ver.code = ? AND v.book = ? AND v.chapter = ?
+                    ORDER BY v.verse
+                    """,
+                    (str(version), str(b), int(chapter)),
+                ).fetchall()
+                if rows:
+                    return [dict(r) for r in rows]
+        return []
+
+    except Exception as e:
+        log.error("db_get_chapter: %s", e)
+        return []
+
+
 def db_list_versions() -> List[str]:
     try:
         with _conn() as c:
@@ -431,24 +485,16 @@ class HybridEngine:
 
         self.session = SessionState(default_version=version)
 
-        # The verse actually live on the projector right now (the
-        # "green" on-screen text) — distinct from session.current_book/
-        # chapter/verse, which _display() updates for every engine
-        # decision regardless of whether it ever reaches the screen (it
-        # may just be sitting in Preview or the AI Detections queue).
-        # Navigation (_navigate), within-chapter verse-jump (_run_fast
-        # step 4), and version-switch's "redisplay current verse"
-        # (_switch_version) all PREFER this — anchoring to what's actually
-        # on the projector when something is live — but all three fall
-        # back to session position when nothing is live yet. That fallback
-        # matters: Go Live defaults OFF (main_ui.py) and every verse lands
-        # in Preview first, so _live_position is routinely still None
-        # mid-sermon. Without the fallback, voice "next verse" / "verse
-        # 20" / version-switch commands would silently no-op for any
-        # operator who hasn't explicitly gone live yet — this was a real
-        # bug, not a hypothetical. See confirm_live(), called by the UI at
-        # the single point a verse actually goes live (main_ui.py's
-        # _set_live).
+        # The verse actually live on the projector right now — distinct
+        # from session.current_book/chapter/verse, which _display() updates
+        # for every engine decision regardless of whether it ever reaches
+        # the screen. Navigation, verse-jump, and version-switch's
+        # "redisplay current verse" all prefer this but fall back to
+        # session position when nothing is live yet — Go Live defaults OFF
+        # and every verse lands in Preview first, so this is routinely
+        # still None mid-sermon; without the fallback those commands would
+        # silently no-op (a real, previously-shipped bug). Set via
+        # confirm_live(), called by main_ui.py's _set_live.
         self._live_position: Optional[Tuple[str, int, int]] = None
 
         self.semantic = SemanticEngine()
@@ -467,21 +513,22 @@ class HybridEngine:
         self._last_voice_nav_cmd: Optional[str] = None
         self._last_voice_nav_time: float = 0.0
 
+        # Ambiguous PREV phrase awaiting a confirming repeat — see
+        # AMBIGUOUS_NAV_CONFIRM_WINDOW above.
+        self._pending_ambiguous_nav: Optional[str] = None
+        self._pending_ambiguous_nav_time: float = 0.0
+
         # Whole-utterance-granularity buffer — only used by
         # _extract_split_reference, which needs a complete previous
         # utterance's text, not a word-count window.
         self._sentence_history: deque = deque(maxlen=ROLLING_CONTEXT_SENTENCES)
 
         # ── Semantic shadow check ────────────────────────────────────
-        # A successful direct-reference match resolves and displays
-        # immediately (see _run_fast) — it's already the most reliable
-        # signal available, so it must never wait on semantic. But that
-        # means direct-reference utterances otherwise never get a
-        # semantic opinion at all, unlike everything that falls through to
-        # _run_semantic. This gives every direct-reference match a
-        # background-only semantic look, purely to log agreement/
-        # disagreement for review — see _log_semantic_shadow. Never
-        # touches the display or session state.
+        # A direct-reference match resolves and displays immediately
+        # (_run_fast), so it never gets a semantic opinion the way
+        # _run_semantic candidates do. This runs one in the background,
+        # purely to log agreement/disagreement for review (see
+        # _log_semantic_shadow) — never touches the display or session.
         self._shadow_executor = ThreadPoolExecutor(
             max_workers=2, thread_name_prefix="bible-ai-shadow-semantic"
         )
@@ -626,16 +673,11 @@ class HybridEngine:
     # ========================================================
     # COMMAND TAGGING
     # ========================================================
-    # Direct/semantic detections are tagged with match_type inside their
-    # own steps because they carry a real, graded confidence. Navigation,
-    # verse-jump, and version-switch are deterministic operator/voice
-    # commands, not probabilistic guesses — but the operator still wants
-    # every verse-triggering event visible in the AI Detections panel and
-    # audit trail, not just AI guesses. Tagged with confidence=1.0 (no
-    # ambiguity to grade) and a distinct match_type so the UI can style
-    # them as commands rather than detections, and so _on_verse's
-    # Auto/Manual gate — which only holds back "semantic" — never touches
-    # them.
+    # Navigation/verse-jump/version-switch are deterministic commands, not
+    # probabilistic guesses, but still need to show in the AI Detections
+    # audit trail — tagged confidence=1.0 with a distinct match_type so
+    # the UI styles them as commands and _on_verse's Auto/Manual gate
+    # (which only holds back "semantic") never touches them.
 
     def _tag_command(self, verse: Dict, match_type: str, source_text: str):
         verse["match_type"] = match_type
@@ -712,17 +754,9 @@ class HybridEngine:
     def _navigate(self, cmd: str):
         cmd = str(cmd).upper().strip()
 
-        # Prefer the live projector position when there is one. But every
-        # verse lands in Preview before it's ever pushed Live (Go Live
-        # defaults OFF — see main_ui.py), so _live_position is routinely
-        # still None even mid-sermon if the operator hasn't explicitly
-        # gone live yet. Falling back to session.current_book/chapter/
-        # verse — updated by every _display() call regardless of Live/
-        # Preview, see __init__'s comment on _live_position — means voice
-        # navigation still moves whatever's currently being tracked
-        # instead of silently no-op'ing until the first Live push. Same
-        # fallback already applied to _switch_version for the identical
-        # reason.
+        # Prefer live position; fall back to session position (see
+        # __init__'s _live_position comment) so navigation still works
+        # before the first Go Live push, same as _switch_version.
         if self._live_position:
             book, chapter, verse = self._live_position
         elif self._has_position():
@@ -744,14 +778,11 @@ class HybridEngine:
         if book is None:
             book, chapter, verse = "", 0, 0
 
-        # _set_state("sequential") runs AFTER _display(), not before — see
-        # the comment on _display() itself for why the order matters:
-        # _display() unconditionally sets state to "verse_tracking" as
-        # part of every call, which would otherwise immediately overwrite
-        # "sequential" back to "verse_tracking" in the very same command,
-        # making the sequential state unreachable by anything that runs
-        # afterward (including SEMANTIC_CONFIDENCE_HI's own state check
-        # and the operator-facing status label).
+        # _set_state("sequential") must run AFTER _display(), not before —
+        # _display() unconditionally sets "verse_tracking" on every call,
+        # which would otherwise immediately overwrite "sequential" in the
+        # same command, making it unreachable by SEMANTIC_CONFIDENCE_HI's
+        # state check and the status label.
         if cmd == "NEXT":
             r = db_get_next_verse(version, book, chapter, verse)
             if r:
@@ -823,16 +854,10 @@ class HybridEngine:
         if self._status_cb:
             self._status_cb("version_switch", f"Switched to {new_ver}")
 
-        # Prefer the live projector position when there is one (keeps the
-        # on-screen verse anchored to what's actually live). But every
-        # verse lands in Preview before it's ever pushed Live (see
-        # main_ui.py's _promote_to_preview) — if nothing has gone live
-        # yet, _live_position is still None even though the operator has
-        # a verse showing in Preview, and that Preview text would
-        # otherwise keep displaying the OLD version after the switch.
-        # Falling back to session.current_book/chapter/verse (updated by
-        # every _display() call regardless of Live/Preview — see
-        # __init__'s comment on _live_position) covers that case too.
+        # Prefer live position; fall back to session position (see
+        # __init__'s _live_position comment) — otherwise Preview would
+        # keep showing the old version after a switch, before anything's
+        # gone live yet.
         if self._live_position:
             book, chapter, verse_no = self._live_position
         elif self._has_position():
@@ -926,26 +951,36 @@ class HybridEngine:
                 )
                 return True
 
+            if nav_requires_confirm(text):
+                if (
+                    self._pending_ambiguous_nav == nav
+                    and now - self._pending_ambiguous_nav_time
+                    < AMBIGUOUS_NAV_CONFIRM_WINDOW
+                ):
+                    log.info(
+                        "Ambiguous nav '%s' confirmed by a repeat — firing",
+                        nav,
+                    )
+                    self._pending_ambiguous_nav = None
+                else:
+                    log.info(
+                        "Ambiguous nav '%s' detected (%r) — waiting up to "
+                        "%.0fs for a confirming repeat before acting",
+                        nav, text[:60], AMBIGUOUS_NAV_CONFIRM_WINDOW,
+                    )
+                    self._pending_ambiguous_nav = nav
+                    self._pending_ambiguous_nav_time = now
+                    return True
+
             self._last_voice_nav_cmd = nav
             self._last_voice_nav_time = now
             self._navigate(nav)
             return True
 
         # ====================================================
-        # 3. Direct reference ALWAYS wins
-        #
-        # This must come before verse jump.
-        #
-        # Example:
-        #   Current position: Matthew 4:21
-        #   Input: "Matthew 5 verse 10"
-        #
-        # Correct:
-        #   Matthew 5:10
-        #
-        # Wrong old behavior:
-        #   Detects only "verse 10"
-        #   Jumps to Matthew 4:10
+        # 3. Direct reference ALWAYS wins — must come before verse jump,
+        # or e.g. "Matthew 5 verse 10" while sitting on Matthew 4:21 would
+        # detect only "verse 10" and wrongly jump to Matthew 4:10.
         # ====================================================
         ref_info = extract_reference_verbose(
             text, allowed_languages=self._allowed_languages()
@@ -1032,15 +1067,59 @@ class HybridEngine:
                 verse,
             )
 
+        # No chapter/verse number anywhere in the utterance, but a book
+        # may still have been NAMED ("in the book of Romans, he talks
+        # about how we should live") — extract_reference_verbose and the
+        # split-reference fallback above both need a number to anchor a
+        # reference on, so this case falls through both of them with
+        # book left None. Without this, a named book carries no more
+        # weight than if it had never been said at all — the utterance
+        # would get an unscoped, whole-Bible semantic search exactly like
+        # any other sentence, discarding a real, spoken signal about
+        # where to look. search_within_book only returns a candidate that
+        # already clears the normal display threshold scoped to that one
+        # book, so a bare book mention with no real paraphrase content
+        # ("let's go to the book of Romans") correctly finds nothing here
+        # and falls through to step 5's unscoped search, same as before.
+        if book is None:
+            named_book = extract_book_only(
+                text, allowed_languages=self._allowed_languages()
+            )
+            if named_book:
+                stripped = strip_reference_words(text, named_book)
+                scoped = self.semantic.search_within_book(stripped, named_book)
+
+                if scoped:
+                    final_score = float(scoped.get("final_score", 0))
+                    log.info(
+                        "Book-scoped semantic match within %s: %s %s:%s "
+                        "score=%.3f",
+                        named_book,
+                        scoped.get("book"),
+                        scoped.get("chapter"),
+                        scoped.get("verse"),
+                        final_score,
+                    )
+
+                    r = db_get_verse(
+                        str(self.session.active_version),
+                        str(scoped.get("book", "")),
+                        int(scoped.get("chapter", 0)),
+                        int(scoped.get("verse", 0)),
+                    )
+
+                    if r:
+                        r["match_type"] = "semantic"
+                        r["confidence"] = final_score
+                        r["matched_at"] = time.time()
+                        r["source_text"] = text
+                        self._display(r)
+                        self._log_semantic_shadow(text, r)
+                        return True
+
         # ====================================================
-        # 4. Verse jump
-        #
-        # Only runs if NO direct reference was found.
-        #
-        # Example:
-        #   Current position: John 3:16
-        #   Input: "verse 20"
-        #   Result: John 3:20
+        # 4. Verse jump — only if no direct reference was found. E.g. from
+        # John 3:16, "verse 20" resolves to John 3:20.
         # ====================================================
         jump_book = jump_chapter = None
         if self._live_position:
@@ -1139,21 +1218,15 @@ class HybridEngine:
                 text[:100],
             )
 
-            # A genuine, independent match for DIFFERENT content than the
-            # reference itself — not a disagreement to merely log and
-            # discard. The common real case: a preacher cites a verse by
-            # number and, in the same breath, paraphrases a second,
-            # different verse ("...Romans 1:16, for I am not ashamed...
-            # We receive forgiveness, redemption and acceptance before
-            # God"). Direct-reference wins the utterance and returns
-            # immediately (see _run_fast), so that second citation would
-            # otherwise never reach semantic search at all — this is the
-            # general fix for that whole utterance shape, not a curated
-            # phrase for one sermon's wording. Surfaced as a detection
-            # only (see _notify_secondary_detection) — never overrides the
-            # direct match already on screen or touches session position;
-            # the same Auto/Manual gating any other semantic detection
-            # gets applies here too, via the normal verse callback.
+            # A genuine second match for different content than the
+            # reference itself, not just a disagreement — the common case
+            # is a preacher citing a verse by number and, in the same
+            # breath, paraphrasing a different one. Direct-reference wins
+            # the utterance and returns immediately (_run_fast), so that
+            # second citation would otherwise never reach semantic search.
+            # Surfaced as a detection only, via the normal verse callback
+            # (same Auto/Manual gating as any other semantic detection) —
+            # never overrides the direct match already on screen.
             row = db_get_verse(
                 str(self.session.active_version),
                 str(sem.get("book", "")),
@@ -1263,6 +1336,44 @@ class HybridEngine:
                 sem["source_text"] = text
                 self._display(sem)
                 return
+
+            # The engine found a real candidate — semantic.py already
+            # cleared its own internal bar (DISPLAY_THRESHOLD / lexical
+            # gates) to even return this — but it misses the stricter
+            # bar this caller is judging against right now (in_context
+            # vs tracking vs default — see above). That's still a
+            # genuine detection, not nothing: surface it to the AI
+            # Detections panel as a log entry via the same
+            # display-free path _log_semantic_shadow uses, instead of
+            # discarding it below with zero operator-visible trace.
+            log.info(
+                "Semantic (below bar): %s %s:%s score=%.3f "
+                "(need >= %.2f)",
+                sem.get("book"), sem.get("chapter"), sem.get("verse"),
+                final_score, threshold,
+            )
+            row = db_get_verse(
+                str(self.session.active_version),
+                str(sem.get("book", "")),
+                int(sem.get("chapter", 0)),
+                int(sem.get("verse", 0)),
+            )
+            notify = row or sem
+            notify["match_type"] = "semantic"
+            notify["confidence"] = final_score
+            notify["matched_at"] = time.time()
+            notify["source_text"] = text
+            notify.setdefault("version", str(self.session.active_version))
+            # Log-only: unlike the shadow-disagreement notify below (which
+            # deliberately stays eligible for normal Auto/Manual promotion
+            # — see its comment), this candidate was already judged and
+            # rejected against the correct bar for right now. Letting it
+            # still clear the UI's separate, lower auto-push confidence
+            # would silently undo that decision, so main_ui.py's _on_verse
+            # must never promote it — see its "_below_confidence" check.
+            notify["_below_confidence"] = True
+            self._notify_secondary_detection(notify)
+            return
 
         # ====================================================
         # 6. No match

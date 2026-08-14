@@ -20,18 +20,11 @@ scores non-scriptural text below 0.45 consistently.
 
 import os
 
-# ── Force offline mode before any HuggingFace import ─────
-# Must run before `from sentence_transformers import SentenceTransformer`
-# below — sentence-transformers pulls in transformers/huggingface_hub at
-# import time, and those libraries only honor these flags if they're
-# already set when THEY import, not merely before SentenceTransformer(...)
-# is later constructed. Previously these two lines sat after the
-# sentence_transformers import (i.e. too late for that import itself) and
-# didn't include HF_HUB_OFFLINE — the flag huggingface_hub itself checks;
-# TRANSFORMERS_OFFLINE alone doesn't stop it. At a venue with genuinely no
-# internet (not just flaky), the gap meant a silent hang trying to reach
-# huggingface.co before falling back to the local cache, rather than an
-# instant, guaranteed-local load.
+# Must be set before the sentence_transformers import below — it pulls in
+# transformers/huggingface_hub at import time, and they only honor these
+# flags if already set by then. HF_HUB_OFFLINE specifically is what
+# huggingface_hub itself checks; TRANSFORMERS_OFFLINE alone doesn't stop
+# a hang trying to reach huggingface.co with no internet available.
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 os.environ["HF_DATASETS_OFFLINE"] = "1"
 os.environ["HF_HUB_OFFLINE"] = "1"
@@ -42,6 +35,7 @@ from collections import Counter
 import faiss
 import math
 import numpy as np
+import torch
 from sentence_transformers import SentenceTransformer
 from app.database.db import get_all_verses
 import re
@@ -57,6 +51,21 @@ sys.path.insert(
     )
 )
 
+# Bounds torch's own intra-op thread pool for the embedding model's CPU
+# inference. Left at its default, torch claims os.cpu_count() threads
+# (12 on the reference machine) for a forward pass that embeds a single
+# short sentence — a workload too small to benefit from that many threads
+# (synchronization overhead dominates past ~4), and those threads then
+# compete for the same physical cores faster-whisper's decode pool is
+# using concurrently (transcriber.py's local backend runs cpu_threads=8
+# per decode, up to 2 concurrent). Bounding torch's pool leaves headroom
+# for ASR decode instead of both fighting over every core. Pure thread
+# scheduling — same floating-point ops, same model, same weights, so
+# search()/search_top_k()'s scores are unaffected; verified via
+# accuracy_eval.py below rather than assumed.
+TORCH_CPU_THREADS = 4
+torch.set_num_threads(TORCH_CPU_THREADS)
+
 
 # ════════════════════════════════════════════════════════════
 # SETTINGS
@@ -65,33 +74,50 @@ sys.path.insert(
 MODEL_NAME = "all-MiniLM-L6-v2"
 SIMILARITY_THRESHOLD = 0.45   # minimum FAISS cosine score
 LEXICAL_THRESHOLD = 0.60   # minimum score for lexical fallback
-DISPLAY_THRESHOLD = 0.55   # minimum final score to display
+DISPLAY_THRESHOLD = 0.58   # minimum final score to display
+# Raised bar for queries under MIN_SEMANTIC_TOKENS content words — short
+# phrases can genuinely score 0.64+ (see _PHRASE_MAP), well above
+# DISPLAY_THRESHOLD, but also risk scoring high "by chance" on shared
+# vocabulary alone, which is what MIN_SEMANTIC_TOKENS guards against.
+SHORT_QUERY_DISPLAY_THRESHOLD = 0.62
 DEFAULT_TOP_K = 20
 INDEX_SIGNATURE = "semantic_lexical_v7"
 
-# Split of the lexical score between corpus-idf-weighted word overlap and
-# the contiguous-phrase bonus (see _lexical_score_from_parts). A verbatim
-# multi-word phrase match is a far more specific signal than "these two
-# passages share some words" — a sermon framing clause ("Paul said... the
-# law of God...") can rack up idf-weighted overlap with an unrelated verse
-# that happens to share the same common nouns, but it won't reproduce an
-# exact phrase like "another law" from the verse actually being quoted.
-# Tuned against app/evaluation/testsets/starter_testset.csv (see
-# app/evaluation/accuracy_eval.py) — 0.6/0.4 was the smallest phrase-bonus
-# weight that flipped the Romans 7:23 "I see then another law" miss
-# without moving the testset's accuracy or false-positive numbers.
+# Lexical score = PHRASE_BONUS_WEIGHT * contiguous-phrase match +
+# OVERLAP_WEIGHT * idf-weighted word overlap. A verbatim phrase match is a
+# far more specific signal than shared vocabulary alone (a framing clause
+# can rack up overlap with an unrelated verse sharing the same common
+# nouns). Tuned against app/evaluation/testsets/starter_testset.csv —
+# 0.6/0.4 is the smallest phrase-bonus weight that fixes the Romans 7:23
+# "I see then another law" miss without moving accuracy/false-positives.
 PHRASE_BONUS_WEIGHT = 0.6
 OVERLAP_WEIGHT = 1.0 - PHRASE_BONUS_WEIGHT
 
-# Below this many non-stopword tokens, statistical matching (FAISS +
-# lexical) is skipped entirely — only the curated phrase/event maps above
-# are trusted. Short exclamations like "Jesus", "bless him", "praise him"
-# share just enough vocabulary with random short verses to score
-# deceptively high by chance; they carry too little real content for a
-# similarity score to mean anything. 3 was chosen because every validated
-# genuine paraphrase in app/evaluation/testsets/starter_testset.csv has at
-# least 3 content tokens — this floor doesn't touch any of those.
+# Below this many non-stopword tokens, only the curated phrase/event maps
+# are trusted — FAISS + lexical are skipped entirely. Short exclamations
+# ("Jesus", "bless him") share enough vocabulary with random short verses
+# to score deceptively high with too little real content behind it. 3
+# because every genuine paraphrase in starter_testset.csv has at least
+# that many content tokens.
 MIN_SEMANTIC_TOKENS = 3
+
+# _map_search's substring check ("is this curated phrase found anywhere
+# inside what was heard") has no way to tell a sentence THAT IS the famous
+# phrase apart from a sentence that merely CONTAINS it as a small fragment
+# of a much longer, differently-themed statement — and a hit there returns
+# final_score=1.0 unconditionally, bypassing every other check in this
+# file. This floor requires the matched phrase to be a real fraction of
+# what was actually said, not just present somewhere in it. Measured
+# against every currently-passing phrase_map/event_map case across all
+# three test sets (starter/stress/generalization) before choosing this
+# number: the lowest genuine hit's coverage is 0.40 ("move a mountain" is
+# 2 of the 5 content tokens in "if you have faith you can move a
+# mountain") — 0.35 sits under that with a small margin, so no existing
+# case is affected, while a phrase mentioned only in passing inside a much
+# longer sentence (e.g. "prodigal son" as 2 of 20+ content tokens in an
+# unrelated story) now correctly falls through to the real scored path
+# instead of an unconditional 100%.
+PHRASE_MAP_COVERAGE_MIN = 0.35
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INDEX_DIR = os.path.join(BASE_DIR, "..", "..", "models", "indexes")
@@ -227,158 +253,56 @@ _PHRASE_MAP: Dict[str, Tuple[str, int, int]] = {
     "let the weak say i am strong":            ("Joel",          3, 10),
     "beat your plowshares into swords":        ("Joel",          3, 10),
 
-    # Matthew — faith-moving-mountains is a stock sermon paraphrase of
-    # this verse ("faith as a grain of mustard seed... say unto this
-    # mountain, Remove... it shall remove"), not a verbatim quote, so it
-    # can't be caught by lexical overlap. Validated recall miss on
-    # app/evaluation/testsets/starter_testset.csv (semantic-11).
+    # Matthew — stock sermon paraphrase, not a verbatim quote (starter-set semantic-11)
     "move a mountain":                         ("Matthew",      17, 20),
     "moving mountains":                        ("Matthew",      17, 20),
     "faith to move mountains":                 ("Matthew",      17, 20),
 
-    # Romans — the well-known sermon takeaway of the whole "nothing shall
-    # separate us" passage (Romans 8:35-39) is conventionally cited at
-    # verse 35, its opening rhetorical question, even though the literal
-    # "love of God" wording is at verse 39 ("love of Christ" at 35).
-    # Validated recall miss on starter_testset.csv (semantic-12).
+    # Romans — "nothing shall separate us" conventionally cited at v35, not v39 (semantic-12)
     "nothing can separate us from the love of god": ("Romans",     8, 35),
     "separate us from the love of god":             ("Romans",     8, 35),
 
-    # Batch below: found by running a 55-case, user-authored real-world
-    # paraphrase stress test (app/evaluation/testsets/semantic_stress_testset.csv)
-    # against the live pipeline — a much harder, more representative set
-    # than the curated starter testset. Each entry here was individually
-    # verified against the actual KJV verse text before adding (not just
-    # "sounds plausible"), and each failed for a *specific, diagnosed*
-    # reason despite being an unambiguous, famous, single-answer phrase:
-
-    # John — "it is finished" alone has only one content word after
-    # stopword filtering ("it"/"is" are both stopwords), under
-    # MIN_SEMANTIC_TOKENS=3, so it never even reached FAISS scoring even
-    # though its actual similarity (0.468) was reasonable.
-    "it is finished":                          ("John",         19, 30),
-
-    # Isaiah — same MIN_SEMANTIC_TOKENS problem ("sing" + "barren" = 2
-    # content words) despite an excellent underlying score (final=0.640).
-    "sing o barren":                           ("Isaiah",       54,  1),
-
-    # Romans — "being" is a stopword, so "being justified freely" has
-    # only 2 content tokens ("justified", "freely") and never reached
-    # scoring, despite an excellent underlying score (final=0.720).
-    "being justified freely":                  ("Romans",        3, 24),
+    # Below: curated from a 55-case real-world paraphrase stress test
+    # (semantic_stress_testset.csv) — each verified against real KJV text
+    # and diagnosed, not guessed:
+    "it is finished":                          ("John",         19, 30),  # under MIN_SEMANTIC_TOKENS (1 content word)
+    "sing o barren":                           ("Isaiah",       54,  1),  # under MIN_SEMANTIC_TOKENS (2 content words)
+    "being justified freely":                  ("Romans",        3, 24),  # under MIN_SEMANTIC_TOKENS (2 content words)
     "justified freely by his grace":           ("Romans",        3, 24),
-
-    # Song of Solomon — near-verbatim quote (lex=1.0) but the raw
-    # semantic-similarity component alone (0.4449) missed the separate
-    # sim>=0.45 sub-floor by 0.0051, even though the blended final score
-    # (0.584) cleared the main 0.50 bar comfortably.
-    "kiss me with the kisses of his mouth":    ("Song of Solomon", 1, 2),
-
-    # Romans — final score (0.497) missed the 0.50 floor by 0.003.
-    "goodness of god leadeth thee to repentance": ("Romans",      2,  4),
+    "kiss me with the kisses of his mouth":    ("Song of Solomon", 1, 2),  # sim=0.4449 missed the 0.45 sub-floor by 0.0051
+    "goodness of god leadeth thee to repentance": ("Romans",      2,  4),  # final=0.497, 0.003 under the 0.50 floor
     "gods goodness leads us to repentance":       ("Romans",      2,  4),
-
-    # 2 Corinthians — near-verbatim of the verse's own wording ("might be
-    # made the righteousness of God in him"), but didn't even place in the
-    # top 30 FAISS candidates for its actual phrasing; lexical overlap
-    # can't rescue a verse that FAISS never surfaces as a candidate in the
-    # first place. Same verse as "he knew no sin" above.
-    "the righteousness of god in him":         ("2 Corinthians",  5, 21),
-
-    # Hebrews — final score (0.487) missed the 0.50 floor by 0.013.
-    "we have a strong consolation":            ("Hebrews",        6, 18),
-
-    # Hebrews — final score (0.492) missed the 0.50 floor by 0.008.
-    "save them to the uttermost":              ("Hebrews",        7, 25),
+    "the righteousness of god in him":         ("2 Corinthians",  5, 21),  # didn't place in top-30 FAISS candidates at all
+    "we have a strong consolation":            ("Hebrews",        6, 18),  # final=0.487, 0.013 under the floor
+    "save them to the uttermost":              ("Hebrews",        7, 25),  # final=0.492, 0.008 under the floor
     "save to the uttermost":                   ("Hebrews",        7, 25),
-
-    # Luke — final score (0.476) missed the 0.50 floor by 0.024; part of
-    # the same prodigal-son cluster as the entries above.
-    "riotous living":                          ("Luke",          15, 13),
-
-    # Hebrews — a very common, distinctly-worded covenant phrase that
-    # still didn't place in the top 30 FAISS candidates for this exact
-    # wording — a genuine embedding-recall gap, not a borderline score.
-    "never leave thee nor forsake thee":       ("Hebrews",       13,  5),
+    "riotous living":                          ("Luke",          15, 13),  # final=0.476, 0.024 under the floor
+    "never leave thee nor forsake thee":       ("Hebrews",       13,  5),  # genuine embedding-recall gap, not borderline
     "never leave you nor forsake you":         ("Hebrews",       13,  5),
     "never leave thee forsake thee":           ("Hebrews",       13,  5),
     "never leave you forsake you":             ("Hebrews",       13,  5),
+    "did not look at the deadness of sarahs womb": ("Romans",     4, 19),  # final=0.482, 0.018 under the floor
+    "i will not be wroth with thee":           ("Isaiah",        54,  9),  # was false-matching Deut 3:26 via shared word "wroth"
 
-    # Romans — correctly ranked #1 already (final=0.482) but missed the
-    # 0.50 floor by 0.018; specific enough to a single event/verse that
-    # curating it carries no real ambiguity risk.
-    "did not look at the deadness of sarahs womb": ("Romans",     4, 19),
-
-    # Isaiah — was previously being caught by a false lexical match to
-    # Deuteronomy 3:26 (shares the rare word "wroth" but is a completely
-    # different passage about Moses, not a covenant promise). Curating the
-    # real source phrase directly is safer than trying to suppress the
-    # false match through scoring changes.
-    "i will not be wroth with thee":           ("Isaiah",        54,  9),
-
-    # Batch below: found by running a real transcribed sermon (Whisper
-    # output, not clean text) end-to-end through HybridEngine and diffing
-    # against the preacher's own expected-verse list — only 4/12 expected
-    # verses displayed. Each entry here was individually score-checked
-    # against the real KJV text (not just "sounds plausible") before
-    # adding; the other misses from that same session were NOT curated —
-    # see the module-level note below this block for why.
-
-    # Hebrews — "we have boldness to approach god's presence" scored
-    # final=0.467 (sim=0.607), missing the 0.50 floor by 0.033 — and
-    # several unrelated Hebrews verses that merely share the word
-    # "boldness" (13:16, 10:26, 5:3) ranked ABOVE the real target, so
-    # lowering the floor alone would have surfaced the wrong verse, not
-    # this one.
-    # "god s" (with a space), not "gods" — clean_text() turns a possessive
-    # apostrophe into a literal space ("God's" -> "god s"), it doesn't drop
-    # it, so a no-space "gods" key here would silently never match.
-    "boldness to approach god s presence":     ("Hebrews",       10, 19),
+    # Below: curated from a real transcribed sermon run end-to-end through
+    # HybridEngine (4/12 expected verses displayed before curation):
+    #
+    # "god s" (with a space) not "gods" — clean_text() turns a possessive
+    # apostrophe into a literal space, so a no-space key would never match.
+    "boldness to approach god s presence":     ("Hebrews",       10, 19),  # final=0.467, and unrelated verses outranked it
     "boldness to enter into the holiest":      ("Hebrews",       10, 19),
-
-    # Hebrews — "able to save completely those who come to god through
-    # him" scored final=0.367, well below the existing "save to the
-    # uttermost" entries above (which need the literal word "uttermost"
-    # to fire — this paraphrase never uses it, so those didn't help).
-    "able to save completely those who come":  ("Hebrews",        7, 25),
+    "able to save completely those who come":  ("Hebrews",        7, 25),  # final=0.367, doesn't share a word with "uttermost" entries above
     "save completely those who come to god":   ("Hebrews",        7, 25),
-
-    # 2 Corinthians — "our weapons are spiritual and powerful" already
-    # ranked #1 unscoped (final=0.447, correctly ahead of every unrelated
-    # verse) but still missed the 0.50 floor by 0.053.
-    "our weapons are spiritual and powerful":  ("2 Corinthians",  10,  4),
+    "our weapons are spiritual and powerful":  ("2 Corinthians",  10,  4),  # final=0.447, 0.053 under the floor
     "weapons of our warfare":                  ("2 Corinthians",  10,  4),
-
-    # Ephesians — "forgiveness redemption and acceptance" scored
-    # final=0.487, missing the floor by 0.013 — and Colossians 1:14 (near-
-    # identical KJV wording: "redemption through his blood, even the
-    # forgiveness of sins") outscored it at 0.509. The two verses are
-    # genuinely textually ambiguous from this paraphrase alone; curated to
-    # Ephesians on the sermon author's own stated intent, not because the
-    # text disambiguates it.
-    "forgiveness redemption and acceptance":   ("Ephesians",       1,  7),
+    "forgiveness redemption and acceptance":   ("Ephesians",       1,  7),  # final=0.487; ambiguous vs Colossians 1:14, resolved by sermon author's stated intent
 }
 
-# Verses from that same real-transcript session that were NOT curated
-# above, despite being on the preacher's expected list:
-# - Romans 5:1 ("we have peace with him... justified by faith") and
-#   Romans 8:33 ("no accusation can overcome...") — the source sentences
-#   were dropped/merged away by the ASR almost entirely (confirmed by
-#   reading the actual transcript, not assumed); there was no recognizable
-#   paraphrase left in the utterance to curate a match against.
-# - Hebrews 13:5 ("I will never leave thee, nor forsake thee") — already
-#   curated above (see "never leave thee nor forsake thee" and variants),
-#   but the ASR utterance cut off after "I will never leave", never
-#   producing "forsake" at all. No phrase-map entry can match words that
-#   were never transcribed.
-# - 2 Corinthians 5:21 ("made him to be sin for us... the righteousness of
-#   God in him") — already curated above as "the righteousness of god in
-#   him", but the actual utterance ("our righteousness is not based on our
-#   own weeks, but on Christ finished week") scored only final=0.303,
-#   well behind the top unscoped candidates (~0.39), and "works"/"work"
-#   were both misheard as "weeks"/"week" by the ASR — too corrupted to
-#   safely curate a match against without risking an unrelated false
-#   positive on genuinely different "works"-themed verses in the future.
+# From that same real-transcript session, NOT curated despite being
+# expected: Romans 5:1 / 8:33 (ASR dropped the source sentences almost
+# entirely — no paraphrase left to curate against); Hebrews 13:5 (ASR cut
+# off mid-utterance, already curated above under the full phrase); 2 Cor
+# 5:21 (ASR mis-heard "works"→"weeks", too corrupted to curate safely).
 
 
 # ════════════════════════════════════════════════════════════
@@ -486,19 +410,11 @@ def clean_text(text: str) -> str:
         return ""
     text = text.lower()
     text = text.replace("\u2019", "'")
-    # \w (Unicode-aware by default in Python 3's re) keeps any script's
-    # letters/digits, not just ASCII a-z0-9 \u2014 the ASCII-only version of
-    # this regex silently destroyed non-English verse text: Twi's \u025b/\u0254
-    # characters got replaced with spaces, splitting single words into
-    # garbled fragments ("Ahy\u025base\u025b" -> "ahy" + "ase") and reducing some
-    # words to nothing at all ("b\u0254\u0254" -> "b", then dropped entirely by
-    # tokens()'s len(word) > 1 filter). This function's output feeds both
-    # the per-verse lexical cache (_build_lexical_cache, built from EVERY
-    # verse's text \u2014 so this corrupted the lexical half of search_top_k's
-    # hybrid scoring for every non-English version) and whatever the
-    # operator types into the search box, so a Twi query was being
-    # mangled on the way in too. English is unaffected either way since
-    # a-z0-9 was always a subset of \w.
+    # \w is Unicode-aware by default in Python's re \u2014 keeps any script's
+    # letters, not just ASCII a-z0-9. An ASCII-only class here previously
+    # destroyed Twi's \u025b/\u0254 characters (corrupting the lexical cache for
+    # every non-English verse and the search box's own input); a-z0-9 was
+    # always a subset of \w, so English output is unaffected.
     text = re.sub(r"[^\w\s:']", " ", text)
     text = text.replace("'", " ")
     text = re.sub(r"\s+", " ", text).strip()
@@ -569,21 +485,16 @@ def _lexical_score_from_parts(
     idf: Optional[Dict[str, float]] = None,
     idf_default: float = 1.0,
 ) -> float:
-    """Shared scoring core — takes already-cleaned/tokenized query and
-    verse data so a full-corpus scan (search_lexical) doesn't have to
-    re-run clean_text()/tokens() on every verse for every query. See
-    lexical_score() below for the convenience wrapper that computes the
-    verse side fresh (fine for scoring a handful of candidates).
+    """Shared scoring core — takes pre-cleaned/tokenized query and verse
+    data so a full-corpus scan doesn't re-run clean_text()/tokens() per
+    verse. See lexical_score() below for the fresh-verse convenience
+    wrapper.
 
-    idf (optional): corpus document-frequency weights (see
-    SemanticEngine._build_lexical_cache). Without it, every overlapping
-    word counts equally — "Paul"/"God"/"law"/"said" (which show up in
-    thousands of verses) then count exactly as much as a rare, actually
-    distinctive word. That let a sermon's framing clause ("Paul said...
-    the law of God...") coincidentally out-score the real quoted verse
-    on an unrelated verse that happened to share the same common words.
-    Weighting by idf fixes that: rare words dominate the score, common
-    ones barely move it."""
+    idf (optional): corpus document-frequency weights, so rare words
+    dominate the overlap score and common ones ("Paul", "God", "said")
+    barely move it — without it, a sermon's framing clause could
+    out-score the verse actually being quoted just by sharing common
+    words with it."""
     if not q_clean or not v_clean:
         return 0.0
 
@@ -785,7 +696,58 @@ class SemanticEngine:
             return None
 
         phrase, (book, chapter, verse_no) = best
+
+        # Coverage gate — see PHRASE_MAP_COVERAGE_MIN. Substring containment
+        # alone can't tell "this sentence IS the famous phrase" apart from
+        # "this phrase happens to appear somewhere inside a much longer,
+        # unrelated sentence"; without this, either case reaches the same
+        # unconditional final_score=1.0 below.
+        #
+        # phrase_map ONLY — event_map entries ("prodigal son", "burning
+        # bush") are short, distinctive topic labels by nature, normally
+        # mentioned in passing inside a longer narrative sentence, not
+        # quoted verbatim like a phrase_map entry. Measured directly: "the
+        # prodigal son came home to his fathers house" (coverage 0.33, 2
+        # of 6 content tokens) doesn't even place in the statistical
+        # path's top 5 candidates for Luke 15:11 — there is no fallback to
+        # catch it if event_map rejects it too, unlike phrase_map's
+        # near-verbatim quotes, which the statistical path can usually
+        # still find on its own via the lex>=0.95 bypass in
+        # _clears_display_threshold.
+        if method == "phrase_map":
+            q_tokens = tokens(query)
+            p_tokens = tokens(phrase)
+            coverage = len(p_tokens) / max(len(q_tokens), 1)
+            if coverage < PHRASE_MAP_COVERAGE_MIN:
+                return None
+
         result = self._find_verse_by_reference(book, chapter, verse_no)
+
+        # Single-word event_map entries ("creation", "resurrection",
+        # "crucifixion", "goliath", ...) are common enough English/
+        # theological words to appear in a completely different sense
+        # than the one narrative they're curated for. Confirmed live:
+        # "you are a new creation" (Pauline theology — 2 Corinthians
+        # 5:17 territory, nothing to do with Genesis) matched Genesis 1:1
+        # via the bare word "creation" with zero context check. A real
+        # embedding-similarity check against the matched verse's own text
+        # is the one signal available here that can tell "this utterance
+        # is actually ABOUT that narrative" apart from "this utterance
+        # happens to contain the word" — multi-word entries ("prodigal
+        # son", "burning bush") stay unconditional: they're specific
+        # enough that coincidental appearance is rare, and testing showed
+        # the statistical path can't reliably find them on its own if
+        # this gate ever rejected one (Luke 15:11 didn't place in the
+        # unscoped path's top 5 candidates at all).
+        if result and method == "event_map" and len(tokens(phrase)) <= 1:
+            pair = self.model.encode(
+                [clean_text(query), clean_text(build_embedding_text(result))],
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+            ).astype(np.float32)
+            similarity = float(np.dot(pair[0], pair[1]))
+            if similarity < SIMILARITY_THRESHOLD:
+                return None
 
         if result:
             result["method"] = method
@@ -864,7 +826,9 @@ class SemanticEngine:
     # ── Main search ───────────────────────────────────────────────────
 
     @staticmethod
-    def _clears_display_threshold(candidate: dict) -> bool:
+    def _clears_display_threshold(
+        candidate: dict, min_score: float = DISPLAY_THRESHOLD
+    ) -> bool:
         """final >= 0.50 AND lex >= 0.05 AND (sim >= 0.45 OR lex is a
         verbatim match). Shared by search()'s two passes (context-scoped
         and full-corpus) and search_within_chapter().
@@ -900,7 +864,7 @@ class SemanticEngine:
         lex_score = float(candidate.get("lexical_score", 0))
 
         return (
-            final_score >= DISPLAY_THRESHOLD
+            final_score >= min_score
             and lex_score >= 0.05
             and (semantic_score >= SIMILARITY_THRESHOLD or lex_score >= 0.95)
         )
@@ -934,10 +898,16 @@ class SemanticEngine:
             result["in_context"] = True
             return result
 
-        # Below this many content words there isn't enough signal for a
-        # similarity score to mean anything — see MIN_SEMANTIC_TOKENS.
-        if len(tokens(cleaned_query)) < MIN_SEMANTIC_TOKENS:
-            return None
+        # Below this many content words, a candidate needs to clear a
+        # raised bar instead of being skipped outright — see
+        # SHORT_QUERY_DISPLAY_THRESHOLD for why (real short phrases like
+        # "it is finished" do score well; a hard skip here just discarded
+        # them with no chance to prove it).
+        min_score = (
+            SHORT_QUERY_DISPLAY_THRESHOLD
+            if len(tokens(cleaned_query)) < MIN_SEMANTIC_TOKENS
+            else DISPLAY_THRESHOLD
+        )
 
         # Encoded once and reused by both attempts below — same text, so
         # the embedding is identical either way. Avoids paying for the
@@ -949,34 +919,26 @@ class SemanticEngine:
             normalize_embeddings=True,
         ).astype(np.float32)
 
-        # Context-aware pass: while a book is already locked on screen,
-        # try there first, at the normal (lower) threshold — continuing in
-        # the same book is the expected case, not the risky one. The
-        # caller (hybrid.py) uses "in_context" to decide which threshold
-        # a candidate needs to clear.
+        # Context-aware pass: while a book is locked on screen, try there
+        # first at the normal threshold — continuing in the same book is
+        # the expected case. hybrid.py uses "in_context" to pick which
+        # threshold a candidate then needs to clear.
         #
-        # search_top_k's own `threshold` argument is intentionally NOT
-        # passed through here (both calls below use 0.0 instead) — it
-        # pre-filters candidates on raw cosine similarity alone, before
-        # their lexical score is even computed, which silently discarded
-        # a verbatim-quote candidate (lexical_score's own 1.0 short-circuit
-        # for "query text literally appears in the verse") whenever its
-        # semantic similarity alone happened to sit a hair under 0.45 —
-        # confirmed live on two real cases. _clears_display_threshold is
-        # the one, real gate now (final >= 0.50 AND lex >= 0.05 AND
-        # (sim >= 0.45 OR lex >= 0.95)); this pre-filter was a second,
-        # redundant gate that could veto a candidate the real gate would
-        # have allowed. Free to loosen: the FAISS index is exact
-        # (IndexFlatIP) and already returns its top `search_k` neighbors
-        # regardless of any threshold — this only changes which of those
-        # already-fetched neighbors get scored and considered, not how
-        # many are fetched, so it costs no extra latency.
+        # Both calls below pass threshold=0.0, not search_top_k's default —
+        # pre-filtering on raw cosine similarity alone (before lexical
+        # score is computed) previously discarded verbatim-quote candidates
+        # whenever similarity alone sat just under 0.45, confirmed on two
+        # real cases. _clears_display_threshold is the one real gate now;
+        # this was a second, redundant one. Free to loosen: FAISS
+        # (IndexFlatIP, exact) already fetches its top `search_k`
+        # neighbors regardless of threshold, so this only changes which
+        # already-fetched neighbors get scored, not fetch cost.
         if context_book:
             scoped = self.search_top_k(
                 query, k=5, threshold=0.0, book=context_book,
                 query_embedding=query_embedding,
             )
-            if scoped and self._clears_display_threshold(scoped[0]):
+            if scoped and self._clears_display_threshold(scoped[0], min_score):
                 scoped[0]["in_context"] = True
                 return scoped[0]
 
@@ -984,23 +946,16 @@ class SemanticEngine:
             query, k=top_k, threshold=0.0, query_embedding=query_embedding,
         )
 
-        if candidates and self._clears_display_threshold(candidates[0]):
+        if candidates and self._clears_display_threshold(candidates[0], min_score):
             candidates[0]["in_context"] = False
             return candidates[0]
 
-        # search_lexical() (full-corpus keyword scan) is intentionally NOT
-        # called here anymore. Measured directly against every case in
-        # app/evaluation/testsets/starter_testset.csv: it produced zero true
-        # positives (every genuine match already resolves via phrase_map,
-        # event_map, or the FAISS-based semantic_lexical tier above) and
-        # exactly one false positive (nomatch-8, "i believe god is with us
-        # today" -> wrongly matched Acts 27:25). It was also the single
-        # most expensive step in the whole pipeline even after caching (see
-        # _build_lexical_cache). Zero measured benefit + a confirmed false
-        # positive + the largest latency cost = pure downside here, so it's
-        # been removed from the live decision path. The method itself is
-        # left in place (still directly callable) in case it proves useful
-        # for a future, more targeted use — it just isn't part of search().
+        # search_lexical() (full-corpus keyword scan) is intentionally not
+        # called here — measured against starter_testset.csv it produced
+        # zero true positives (every genuine match already resolves above)
+        # and one false positive, while being the most expensive step in
+        # the pipeline even cached. Left callable directly for a future,
+        # more targeted use; just not part of search() anymore.
         return None
 
     def search_within_chapter(
@@ -1048,6 +1003,57 @@ class SemanticEngine:
         scoped = self.search_top_k(
             query, k=5, threshold=0.0, book=book, chapter=chapter,
         )
+
+        if scoped and self._clears_display_threshold(scoped[0]):
+            scoped[0]["in_context"] = True
+            return scoped[0]
+
+        return None
+
+    def search_within_book(
+        self,
+        query: str,
+        book: str,
+    ) -> Optional[dict]:
+        """Scoped to one book, no chapter — for the case where a book was
+        named ("in the book of Romans, he talks about how we should
+        live") but no chapter or verse number was given anywhere in the
+        utterance, so extract_reference/extract_reference_verbose return
+        nothing at all for hybrid.py's direct-reference step (there's no
+        number to anchor on) and the book name would otherwise carry no
+        weight — the utterance falls through to an unscoped, whole-Bible
+        semantic search exactly as if "Romans" had never been said.
+        Mirrors search_within_chapter (same phrase/event-map-first order,
+        same MIN_SEMANTIC_TOKENS floor, same _clears_display_threshold
+        gate) just without the chapter filter — deliberately does NOT
+        fall back to an unscoped search itself for the same reason
+        search_within_chapter doesn't: the caller already knows more than
+        "nothing," and a same-thread, no-more-informed corpus-wide guess
+        isn't a safer fallback than simply finding nothing here.
+        """
+        if self.index is None or not self.verse_store:
+            raise RuntimeError("Call load_version() first.")
+
+        cleaned_query = clean_text(query)
+
+        if not cleaned_query or is_casual_query(cleaned_query):
+            return None
+
+        result = self._map_search(query, _PHRASE_MAP, "phrase_map")
+        if result and clean_text(str(result.get("book", ""))) == clean_text(book):
+            return result
+
+        result = self._map_search(query, _EVENT_MAP, "event_map")
+        if result and clean_text(str(result.get("book", ""))) == clean_text(book):
+            return result
+
+        # Same floor as search()/search_within_chapter() — a book mention
+        # with no real content beyond it ("let's go to Romans") has too
+        # few content tokens to mean anything statistically.
+        if len(tokens(cleaned_query)) < MIN_SEMANTIC_TOKENS:
+            return None
+
+        scoped = self.search_top_k(query, k=5, threshold=0.0, book=book)
 
         if scoped and self._clears_display_threshold(scoped[0]):
             scoped[0]["in_context"] = True

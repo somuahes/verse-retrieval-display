@@ -42,8 +42,13 @@ BOOK_ALIASES: dict[str, str] = {
     "lev": "Leviticus",
 
     "numbers": "Numbers",
-    "number": "Numbers",
     "num": "Numbers",
+    # Deliberately NOT "number": "Numbers" — that collides with ordinary
+    # sermon speech ("point number one", "number two", "the number
+    # four"), which reference_extractor.py already treats "number" as a
+    # filler word for elsewhere (see its chapter/verse filler-word
+    # lists). Confirmed live: "point number one" was resolving as a
+    # direct reference to Numbers 1:1.
 
     "deuteronomy": "Deuteronomy",
     "deutronomy": "Deuteronomy",
@@ -373,7 +378,6 @@ NUM_WORDS: dict[str, int] = {
 NAV_PHRASES: dict[str, str] = {
     "next verse":           "NEXT",
     "following verse":      "NEXT",
-    "go to next":           "NEXT",
     "move to next verse":   "NEXT",
     "previous verse":       "PREV",
     "go back":              "PREV",
@@ -382,9 +386,6 @@ NAV_PHRASES: dict[str, str] = {
     "last verse":           "LAST",
     "final verse":          "LAST",
     "end of chapter":       "LAST",
-    "read that again":      "REPEAT",
-    "say that again":       "REPEAT",
-    "read again":           "REPEAT",
     "repeat that verse":    "REPEAT",
     "repeat the verse":     "REPEAT",
     "stop display":         "STOP",
@@ -395,6 +396,22 @@ NAV_PHRASES: dict[str, str] = {
     "clear verse":          "STOP",
     "remove verse":         "STOP",
 }
+# Removed, confirmed via direct testing to false-trigger on completely
+# ordinary, non-navigational preaching speech (detect_navigation's plain
+# substring/word-boundary match has no way to tell a deliberate command
+# apart from the same words used rhetorically — same root cause as the
+# phrase_map/event_map fixes in semantic.py):
+#   "go to next" -> NEXT        ("let's go to next point in my outline")
+#   "read again" -> REPEAT      ("let me read again from my notes")
+#   "read that again" -> REPEAT ("let me read that again so it sinks in")
+#   "say that again" -> REPEAT  ("I want to say that again for emphasis")
+# Each had a more distinctive, "verse"-qualified equivalent already in
+# the map, so nothing real is lost. "go back"/"go to previous" were also
+# proven to false-trigger the same way, but were kept (see
+# PREV_CONFIRM_PHRASES above and hybrid.py's _run_fast) — a
+# require-confirmation-by-repeat gate already existed for exactly these
+# two, built (nav_requires_confirm) but never actually wired into
+# hybrid.py; wiring it up preserves the phrase instead of deleting it.
 
 # ============================================================
 # VERSION REGISTRY (trigger phrases -> version code)

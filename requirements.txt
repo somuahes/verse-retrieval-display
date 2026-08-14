@@ -31,6 +31,9 @@ flask>=3.0.0
 # --- Utilities ---
 beautifulsoup4>=4.12.0         # HTML parsing (existing project dependency)
 
+# --- Testing (dev only — not needed to run the app) ---
+pytest>=8.0.0                  # Integration test suite, see tests/
+
 # ============================================================
 #  INSTALL NOTES
 # ============================================================

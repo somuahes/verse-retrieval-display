@@ -8,11 +8,7 @@ Owns:
 - HybridEngine construction
 - Projector DisplayWindow (app/ui/display_window.py)
 - Microphone lifecycle (device selection, start/stop)
-
-Features:
-- Dark / Light / System theme
-- Detection reason log
-- Clean responsive card layout
+- Secondary windows: Theme Designer, Browse, Session History
 """
 
 import os
@@ -25,6 +21,15 @@ import sys
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
+
+# Default folder for saved program (Queue) lists — mirrors themes/ next to it.
+PROGRAMS_DIR = os.path.join(ROOT, "programs")
+
+# ── Force UTF-8 stdout/stderr (Windows consoles default to cp1252,
+# which can't encode the emoji used in status prints below) ────
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
 
 # ── Fix DLL loading on paths with spaces (Windows) ────────
 _torch_lib = os.path.join(
@@ -42,16 +47,22 @@ from app.ui.display_window import DisplayWindow
 from app.ui.theme_model import Theme
 from app.ui import theme_store
 from app.ui.theme_designer import ThemeDesigner
+from app.ui.history_window import HistoryPanel
+from app.ui.browser_window import BrowsePanel
+from app.ui import style_kit
+from app.ui import queue_store
 
-from PyQt5.QtGui import QPalette
+from PyQt5.QtGui import QPalette, QColor
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSettings
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QTextEdit, QLineEdit, QComboBox, QFrame,
-    QSizePolicy, QSplitter, QScrollArea, QCompleter,
+    QSizePolicy, QSplitter, QScrollArea, QCompleter, QFileDialog,
+    QGraphicsDropShadowEffect,
 )
 
 import sounddevice as sd
+import json
 import time
 import argparse
 from datetime import datetime
@@ -226,6 +237,11 @@ def lbl(text="", size=13, color_key="text_p", bold=False):
 def _card(gold=False):
     f = QFrame()
     f.setStyleSheet(card_qss(gold))
+    shadow = QGraphicsDropShadowEffect(f)
+    shadow.setBlurRadius(24)
+    shadow.setOffset(0, 4)
+    shadow.setColor(QColor(0, 0, 0, 110))
+    f.setGraphicsEffect(shadow)
     return f
 
 
@@ -311,7 +327,8 @@ def _make_badge_pair(verse: dict):
 
 AUTO_COOLDOWN_DIRECT = 1.5     # seconds — direct refs can go live fast
 AUTO_COOLDOWN_SEMANTIC = 4.0     # seconds — semantic needs more settle time
-AUTO_SEMANTIC_MIN_CONFIDENCE = 0.65     # stricter bar for auto-push specifically
+AUTO_SEMANTIC_MIN_CONFIDENCE = 0.58     # matches hybrid.py's SEMANTIC_CONFIDENCE — any
+# semantic match that clears the base display threshold also auto-pushes
 
 
 class DetectionCard(QFrame):
@@ -444,6 +461,8 @@ class QueueItem(QFrame):
 
     send_preview = pyqtSignal(dict)
     remove_item = pyqtSignal(object)
+    move_up = pyqtSignal(object)
+    move_down = pyqtSignal(object)
 
     def __init__(self, verse: dict, parent=None):
         super().__init__(parent)
@@ -484,6 +503,22 @@ class QueueItem(QFrame):
         info.addWidget(snip_lbl)
         lay.addLayout(info, stretch=1)
 
+        reorder = QVBoxLayout()
+        reorder.setSpacing(2)
+        up_btn = QPushButton("▲")
+        up_btn.setToolTip("Move up")
+        up_btn.setFixedSize(20, 16)
+        up_btn.setStyleSheet(btn_qss("ghost"))
+        up_btn.clicked.connect(lambda: self.move_up.emit(self))
+        down_btn = QPushButton("▼")
+        down_btn.setToolTip("Move down")
+        down_btn.setFixedSize(20, 16)
+        down_btn.setStyleSheet(btn_qss("ghost"))
+        down_btn.clicked.connect(lambda: self.move_down.emit(self))
+        reorder.addWidget(up_btn)
+        reorder.addWidget(down_btn)
+        lay.addLayout(reorder)
+
         send_btn = QPushButton("▶")
         send_btn.setToolTip("Send to Preview")
         send_btn.setFixedSize(26, 22)
@@ -500,8 +535,9 @@ class QueueItem(QFrame):
 
 
 class SearchResultItem(QFrame):
-    """One row in Context-mode search results (the top hit also gets
-    auto-promoted; this list lets the operator pick a different one)."""
+    """One row in Context-mode search results. Nothing is auto-promoted —
+    the operator explicitly sends (▶) or queues (+) whichever result they
+    want, like picking a result off a search-results page."""
 
     send_preview = pyqtSignal(dict)
     add_queue = pyqtSignal(dict)
@@ -648,8 +684,15 @@ class OperatorWindow(QMainWindow):
     def __init__(self, version: str = "KJV"):
         super().__init__()
         self.setWindowTitle("Bible AI · Operator Panel")
-        self.setMinimumSize(1300, 760)
-        self.resize(1440, 860)
+        self.setWindowIcon(style_kit.app_icon())
+        # Width floor matches the topbar's own measured minimumSizeHint
+        # (1650px with all its current buttons — History/Browse pushed it
+        # past the old 1300/1440 figures, which silently clipped the
+        # title text and overlapped button labels rather than erroring;
+        # confirmed by measuring topbar.minimumSizeHint() directly, not
+        # guessed). Revisit this number if more topbar buttons are added.
+        self.setMinimumSize(1680, 760)
+        self.resize(1750, 860)
 
         self._settings   = QSettings("BibleAI", "OperatorPanel")
         self._theme_mode = self._settings.value("theme", "dark")
@@ -696,8 +739,15 @@ class OperatorWindow(QMainWindow):
         # Queue state — persists across theme rebuilds.
         self._queue: List[dict] = []
 
+        # Session history — every verse actually pushed live, independent
+        # of the AI Detections log (which caps at 30 and includes verses
+        # that never reached Live). Persists across theme rebuilds.
+        self._history: List[dict] = []
+        self._history_panel: Optional[HistoryPanel] = None
+        self._browse_panel: Optional[BrowsePanel] = None
+        self._aux_kind: Optional[str] = None  # None | "browse" | "history"
+
         # Search state.
-        self._last_search_enter_time: float = 0.0
         self._last_search_top_result: Optional[dict] = None
         # True only while the unified Search box's full-pipeline fallback
         # (see _do_search_enter) is calling self._engine.process() — lets
@@ -734,8 +784,25 @@ class OperatorWindow(QMainWindow):
 
     def _refresh_styles(self):
         old = self.centralWidget()
+        # _build_ui() constructs a fresh splitter tree — reparent any
+        # embedded AUX panel (Browse/History) out of the old tree first,
+        # so deleteLater() below doesn't destroy it. Reattaching the same
+        # surviving instance afterward (not recreating it) is what keeps
+        # its in-progress state — e.g. Browse's selected book/chapter —
+        # intact across a theme switch instead of silently resetting it.
+        if self._browse_panel is not None:
+            self._browse_panel.setParent(None)
+        if self._history_panel is not None:
+            self._history_panel.setParent(None)
+        aux_kind = self._aux_kind
         self._build_ui()
         old.deleteLater()
+        panel = self._browse_panel if aux_kind == "browse" else self._history_panel
+        if aux_kind and panel is not None:
+            self._main_splitter.addWidget(panel)
+            panel.show()
+        self._aux_kind = aux_kind
+        self._update_aux_buttons()
 
     # ── UI Build ──────────────────────────────────────────
 
@@ -760,6 +827,7 @@ class OperatorWindow(QMainWindow):
         splitter.addWidget(self._build_middle())
         splitter.addWidget(self._build_right())
         splitter.setSizes([520, 380, 420])
+        self._main_splitter = splitter
 
         outer.addWidget(splitter, stretch=1)
         outer.addWidget(self._build_statusbar())
@@ -834,6 +902,22 @@ class OperatorWindow(QMainWindow):
         self._themes_btn.setStyleSheet(btn_qss("ghost"))
         self._themes_btn.clicked.connect(self._open_theme_designer)
 
+        self._history_btn = QPushButton("🕘 History")
+        self._history_btn.setFixedHeight(32)
+        self._history_btn.setToolTip(
+            "Every verse actually pushed live this session — reviewable "
+            "and exportable, unlike the capped AI Detections log")
+        self._history_btn.setStyleSheet(btn_qss("ghost"))
+        self._history_btn.clicked.connect(self._toggle_history)
+
+        self._browser_btn = QPushButton("📖 Browse")
+        self._browser_btn.setFixedHeight(32)
+        self._browser_btn.setToolTip(
+            "Click Book → Chapter → Verse to find and preview scripture, "
+            "as an alternative to typing into Search")
+        self._browser_btn.setStyleSheet(btn_qss("ghost"))
+        self._browser_btn.clicked.connect(self._toggle_browse)
+
         self._btn_display = QPushButton("Open Display")
         self._btn_display.setStyleSheet(btn_qss("primary"))
         self._btn_display.setToolTip(
@@ -864,6 +948,10 @@ class OperatorWindow(QMainWindow):
         lay.addWidget(self._go_live_btn)
         lay.addSpacing(8)
         lay.addWidget(self._themes_btn)
+        lay.addSpacing(8)
+        lay.addWidget(self._history_btn)
+        lay.addSpacing(8)
+        lay.addWidget(self._browser_btn)
         lay.addSpacing(8)
         lay.addWidget(self._btn_display)
         lay.addSpacing(8)
@@ -946,6 +1034,11 @@ class OperatorWindow(QMainWindow):
         self._det_layout = QVBoxLayout(container)
         self._det_layout.setContentsMargins(0, 0, 6, 0)
         self._det_layout.setSpacing(8)
+        self._det_empty_hint = lbl(
+            "No detections yet — start listening, or use Search / Browse.",
+            11, "text_d")
+        self._det_empty_hint.setWordWrap(True)
+        self._det_layout.addWidget(self._det_empty_hint)
         self._det_layout.addStretch()
 
         self._det_scroll.setWidget(container)
@@ -971,17 +1064,24 @@ class OperatorWindow(QMainWindow):
     def _add_detection_card(self, verse: dict):
         if "match_type" not in verse:
             return
+        # Every engine-triggered verse change is logged here — AI guesses
+        # and deterministic commands alike — so this is a complete
+        # activity log, not just a review queue. See _on_verse for the
+        # separate Auto/Manual gate that holds back only "semantic".
         if float(verse.get("confidence", 0)) < DETECTION_MIN_CONFIDENCE:
             return
 
         was_at_top = self._det_scroll.verticalScrollBar().value() <= 0
 
+        self._det_empty_hint.hide()
         self._detections.insert(0, verse)
         self._det_layout.insertWidget(0, self._make_detection_card(verse))
 
         while len(self._detections) > DETECTION_MAX_CARDS:
             self._detections.pop()
-            old_item = self._det_layout.itemAt(self._det_layout.count() - 2)
+            # Layout order is [newest..oldest card, empty-state hint, stretch]
+            # — the oldest surviving card sits three slots from the end.
+            old_item = self._det_layout.itemAt(self._det_layout.count() - 3)
             if old_item and old_item.widget():
                 old_item.widget().deleteLater()
 
@@ -1008,10 +1108,11 @@ class OperatorWindow(QMainWindow):
         self._detections.clear()
         self._new_count = 0
         self._new_badge.hide()
-        while self._det_layout.count() > 1:
+        while self._det_layout.count() > 2:
             item = self._det_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+        self._det_empty_hint.show()
 
     def _on_detection_preview(self, verse: dict):
         self._engine.manual_display(
@@ -1035,6 +1136,18 @@ class OperatorWindow(QMainWindow):
         header.addStretch()
         self._queue_count_lbl = lbl("0 staged", 10, "text_d")
         header.addWidget(self._queue_count_lbl)
+        load = QPushButton("Load…")
+        load.setToolTip("Load a saved program list, replacing the current Queue")
+        load.setStyleSheet(btn_qss())
+        load.setFixedHeight(24)
+        load.clicked.connect(self._load_queue)
+        header.addWidget(load)
+        save = QPushButton("Save…")
+        save.setToolTip("Save the current Queue as a program list file")
+        save.setStyleSheet(btn_qss())
+        save.setFixedHeight(24)
+        save.clicked.connect(self._save_queue)
+        header.addWidget(save)
         clear = QPushButton("Clear")
         clear.setStyleSheet(btn_qss())
         clear.setFixedHeight(24)
@@ -1052,6 +1165,11 @@ class OperatorWindow(QMainWindow):
         self._queue_layout = QVBoxLayout(container)
         self._queue_layout.setContentsMargins(0, 0, 6, 0)
         self._queue_layout.setSpacing(8)
+        self._queue_empty_hint = lbl(
+            "Queue is empty — add verses from Detections, Search, or Browse.",
+            11, "text_d")
+        self._queue_empty_hint.setWordWrap(True)
+        self._queue_layout.addWidget(self._queue_empty_hint)
         self._queue_layout.addStretch()
 
         self._queue_scroll.setWidget(container)
@@ -1064,6 +1182,8 @@ class OperatorWindow(QMainWindow):
         item = QueueItem(verse)
         item.send_preview.connect(self._on_detection_preview)
         item.remove_item.connect(self._remove_queue_item)
+        item.move_up.connect(lambda w: self._move_queue_item(w, -1))
+        item.move_down.connect(lambda w: self._move_queue_item(w, 1))
         return item
 
     def _rerender_queue(self):
@@ -1079,24 +1199,74 @@ class OperatorWindow(QMainWindow):
         self._update_queue_count()
 
     def _remove_queue_item(self, item_widget):
-        idx = self._queue_layout.indexOf(item_widget)
+        # Layout index 0 is the permanent empty-state hint, so a queue
+        # item's data index is always one behind its layout position.
+        idx = self._queue_layout.indexOf(item_widget) - 1
         if 0 <= idx < len(self._queue):
             self._queue.pop(idx)
         self._queue_layout.removeWidget(item_widget)
         item_widget.deleteLater()
         self._update_queue_count()
 
-    def _clear_queue(self):
-        self._queue.clear()
-        while self._queue_layout.count() > 1:
-            item = self._queue_layout.takeAt(0)
+    def _clear_queue_widgets(self):
+        # Layout is [empty-state hint, item.., stretch] — keep the hint
+        # and the stretch, drop everything staged in between.
+        while self._queue_layout.count() > 2:
+            item = self._queue_layout.takeAt(1)
             if item.widget():
                 item.widget().deleteLater()
+
+    def _clear_queue(self):
+        self._queue.clear()
+        self._clear_queue_widgets()
         self._update_queue_count()
 
     def _update_queue_count(self):
         n = len(self._queue)
         self._queue_count_lbl.setText(f"{n} staged")
+        self._queue_empty_hint.setVisible(n == 0)
+
+    def _move_queue_item(self, item_widget, direction: int):
+        # Same off-by-one as _remove_queue_item — layout index 0 is the
+        # permanent empty-state hint, not a queue item.
+        idx = self._queue_layout.indexOf(item_widget) - 1
+        if idx < 0:
+            return
+        new_idx = idx + direction
+        if not (0 <= new_idx < len(self._queue)):
+            return
+        self._queue[idx], self._queue[new_idx] = self._queue[new_idx], self._queue[idx]
+        self._clear_queue_widgets()
+        self._rerender_queue()
+
+    def _save_queue(self):
+        if not self._queue:
+            return
+        os.makedirs(PROGRAMS_DIR, exist_ok=True)
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Program List", os.path.join(PROGRAMS_DIR, "program.json"),
+            "Program List (*.json)")
+        if not path:
+            return
+        try:
+            queue_store.save_queue(self._queue, path)
+        except OSError as e:
+            self._tx.append(f"[Queue] Save failed: {e}")
+
+    def _load_queue(self):
+        os.makedirs(PROGRAMS_DIR, exist_ok=True)
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load Program List", PROGRAMS_DIR, "Program List (*.json)")
+        if not path:
+            return
+        try:
+            entries = queue_store.load_queue(path)
+        except (OSError, json.JSONDecodeError) as e:
+            self._tx.append(f"[Queue] Load failed: {e}")
+            return
+        self._queue = entries
+        self._clear_queue_widgets()
+        self._rerender_queue()
 
     def _build_mic_card(self):
         card = _card()
@@ -1200,7 +1370,11 @@ class OperatorWindow(QMainWindow):
         top.addWidget(self._ver_lbl)
         push = QPushButton("Push to Live →")
         push.setToolTip("Copy Preview to Live now (always works, regardless of Go Live)")
-        push.setFixedHeight(22)
+        # 22px is too short for btn_qss's 8px+8px vertical padding plus a
+        # real text label (confirmed by a real screen capture: the label
+        # rendered visibly doubled/garbled at 22px) — single-glyph icon
+        # buttons elsewhere get away with 22px, multi-word text needs more.
+        push.setFixedHeight(26)
         push.setStyleSheet(btn_qss("nav"))
         push.clicked.connect(self._push_to_live)
         top.addWidget(push)
@@ -1228,7 +1402,18 @@ class OperatorWindow(QMainWindow):
         lay.setContentsMargins(18, 14, 18, 14)
         lay.setSpacing(6)
 
-        lay.addWidget(lbl("LIVE OUTPUT", 10, "text_d", True))
+        head = QHBoxLayout()
+        head.addWidget(lbl("LIVE OUTPUT", 10, "text_d", True))
+        head.addStretch()
+        save_img = QPushButton("🖼 Save Image")
+        save_img.setToolTip("Save the current live slide as a PNG file")
+        # See the comment on the equivalent Push to Live fix — 22px clips
+        # a real text label under btn_qss's padding.
+        save_img.setFixedHeight(26)
+        save_img.setStyleSheet(btn_qss("nav"))
+        save_img.clicked.connect(self._save_slide_image)
+        head.addWidget(save_img)
+        lay.addLayout(head)
 
         self._live_ref_lbl = QLabel("")
         self._live_ref_lbl.setStyleSheet(
@@ -1497,22 +1682,29 @@ class OperatorWindow(QMainWindow):
             verse_no  = verse.get("verse",   "")
             version   = verse.get("version", "")
 
-            # The AI Detections panel and the engine-position readout
-            # always reflect every engine decision, regardless of
-            # Auto/Manual mode — only Preview/Live promotion is gated.
+            self._add_detection_card(verse)
+
+            if verse.get("_below_confidence"):
+                # hybrid.py already judged this candidate against the
+                # correct bar for right now (e.g. the stricter cross-book
+                # bar while actively sequential) and rejected it — it's
+                # log-only. Must not touch the position readout or reach
+                # the promote-to-Preview logic below: this UI's own,
+                # separately-tuned auto-push confidence could otherwise
+                # clear it and silently override that rejection.
+                return
+
+            # The engine-position readout and the AI Detections panel
+            # both reflect every engine decision, including deterministic
+            # nav commands — see _add_detection_card. Preview/Live
+            # promotion is gated separately, below.
             self._pos_lbl.setText(f"Position: {book} {chapter}:{verse_no}")
             self._match_lbl.setText(f"✓ {version}")
 
-            self._add_detection_card(verse)
-
-            # Only a "semantic" match_type is a probabilistic guess that
-            # needs operator review — direct references are unambiguous
-            # (the preacher said the exact book/chapter/verse), and
-            # navigation/verse_jump/version_switch/manual are deterministic
-            # commands (hybrid.py's _tag_command, confidence=1.0 fixed).
-            # All of those always override whatever is currently displayed,
-            # regardless of Auto/Manual mode — only semantic guesses stay
-            # gated behind operator review.
+            # Only "semantic" is a probabilistic guess needing review —
+            # direct references are unambiguous and commands are
+            # deterministic (hybrid.py's _tag_command, confidence=1.0
+            # fixed), so both always override regardless of Auto/Manual.
             is_semantic_guess = verse.get("match_type") == "semantic"
             if is_semantic_guess and not self._explicit_pipeline_call:
                 if self._display_mode == "manual":
@@ -1688,14 +1880,13 @@ class OperatorWindow(QMainWindow):
 
     def _do_search_enter(self):
         """Unified search: try it as a reference/digit-jump first; if that
-        finds nothing, fall back to topic/paraphrase semantic search."""
+        finds nothing, fall back to topic/paraphrase semantic search.
+        Like a normal search engine, this only lists results — nothing
+        goes to Preview/Live until the operator explicitly sends (▶) or
+        queues (+) one (see _make_search_result_item)."""
         query = self._search_in.text().strip()
         if not query:
             return
-
-        now = time.time()
-        is_double = (now - self._last_search_enter_time) < 0.6
-        self._last_search_enter_time = now
 
         self._clear_search_results()
 
@@ -1705,7 +1896,6 @@ class OperatorWindow(QMainWindow):
             self._search_results_layout.insertWidget(
                 self._search_results_layout.count() - 1,
                 self._make_search_result_item(result))
-            self._promote_search_result(result, force_go_live=is_double)
             return
 
         candidates = self._engine.semantic.search_top_k(query, k=8)
@@ -1721,19 +1911,13 @@ class OperatorWindow(QMainWindow):
                 self._search_results_layout.count() - 1,
                 self._make_search_result_item(c))
         if candidates:
-            self._promote_search_result(candidates[0], force_go_live=is_double)
             return
 
-        # Neither a reference/digit-jump nor a semantic match — this one box
-        # also doubles as the manual/test input, so fall back to running the
-        # query through the full engine pipeline (navigation commands like
-        # "next verse" or "stop display", version switches like "read in
-        # BBE", direct references it phrased oddly, etc). Since typing into
-        # this box is always an explicit operator action, whatever it
-        # resolves to should promote immediately — never held back by
-        # Auto/Manual mode the way a live-speech guess would be. process()
-        # itself always resolves synchronously (see hybrid.py), so this
-        # returns with the result already applied.
+        # Neither a reference nor a semantic match — fall back to the full
+        # engine pipeline (nav commands, version switches, oddly-phrased
+        # references). Typing here is always explicit, so it should
+        # promote immediately, never held back by Auto/Manual mode.
+        # process() resolves synchronously, so this returns already applied.
         self._tx.append(f'[typed] {query}')
         self._explicit_pipeline_call = True
         try:
@@ -1811,6 +1995,97 @@ class OperatorWindow(QMainWindow):
         self._active_theme_name = theme.name
         self._settings.setValue("active_display_theme", theme.name)
 
+    # ── Browse / History — embedded, toggleable AUX panel ──────────
+    # Neither opens a separate window (see the operator panel's own
+    # accessibility feedback: a whole new window per feature is more
+    # clicks and context-switching, not less). Both attach as a 4th pane
+    # in the main splitter, one at a time, collapsing back out when
+    # toggled off — closer to how BibleShow keeps every panel in one
+    # window without needing the screen space for all of them at once.
+
+    def _clear_history(self):
+        self._history.clear()
+
+    def _toggle_browse(self):
+        self._close_aux() if self._aux_kind == "browse" else self._show_aux("browse")
+
+    def _toggle_history(self):
+        self._close_aux() if self._aux_kind == "history" else self._show_aux("history")
+
+    def _show_aux(self, kind: str):
+        was_open = self._aux_kind is not None
+
+        if kind == "browse":
+            if self._browse_panel is None:
+                self._browse_panel = BrowsePanel(
+                    initial_version=str(self._engine.session.active_version))
+                self._browse_panel.send_preview.connect(
+                    lambda v: self._promote_search_result(v, force_go_live=False))
+                self._browse_panel.add_queue.connect(self._add_to_queue)
+                self._browse_panel.closed.connect(self._close_aux)
+            panel = self._browse_panel
+        else:
+            if self._history_panel is None:
+                self._history_panel = HistoryPanel(self._history, self._clear_history)
+                self._history_panel.closed.connect(self._close_aux)
+            panel = self._history_panel
+            panel.refresh()
+
+        # Detach whatever currently occupies the AUX slot before
+        # attaching the new one — Qt removes a widget from its QSplitter
+        # automatically on reparent, so setParent(None) is enough; the
+        # instance itself survives (not deleteLater()'d) so its state
+        # (selected book/chapter, table rows) is intact if reopened.
+        if self._aux_kind == "browse" and self._browse_panel is not None:
+            self._browse_panel.setParent(None)
+        elif self._aux_kind == "history" and self._history_panel is not None:
+            self._history_panel.setParent(None)
+
+        self._main_splitter.addWidget(panel)
+        panel.show()
+        self._aux_kind = kind
+        self._update_aux_buttons()
+
+        if not was_open:
+            self.resize(self.width() + panel.PANEL_WIDTH, self.height())
+
+    def _close_aux(self):
+        if self._aux_kind is None:
+            return
+        panel = self._browse_panel if self._aux_kind == "browse" else self._history_panel
+        width = panel.PANEL_WIDTH if panel is not None else 0
+        if panel is not None:
+            panel.setParent(None)
+        self._aux_kind = None
+        self._update_aux_buttons()
+        self.resize(max(self.minimumWidth(), self.width() - width), self.height())
+
+    def _update_aux_buttons(self):
+        self._browser_btn.setStyleSheet(
+            btn_qss("active" if self._aux_kind == "browse" else "ghost"))
+        self._history_btn.setStyleSheet(
+            btn_qss("active" if self._aux_kind == "history" else "ghost"))
+
+    # ── Save slide as image ─────────────────────────────────
+
+    def _save_slide_image(self):
+        if not self._history:
+            return
+        if self._display.width() <= 1 or self._display.height() <= 1:
+            self._display.resize(*DisplayWindow.DEFAULT_SIZE)
+        pixmap = self._display.grab()
+        if pixmap.isNull():
+            return
+        last = self._history[-1]
+        default_name = (
+            f"{last.get('book', 'verse')}_{last.get('chapter', '')}_"
+            f"{last.get('verse', '')}.png"
+        ).replace(" ", "_")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Slide Image", default_name, "PNG Image (*.png)")
+        if path:
+            pixmap.save(path, "PNG")
+
     # ── Auto / Manual display mode ─────────────────────────
 
     def _update_mode_btn(self):
@@ -1858,6 +2133,16 @@ class OperatorWindow(QMainWindow):
             self._live_text_lbl.setText(str(verse.get("text", "")))
             if self._display.isVisible():
                 self._display.show_verse(verse)
+
+            self._history.append({
+                "book": book, "chapter": chapter, "verse": vnum,
+                "version": verse.get("version", ""),
+                "text": verse.get("text", ""),
+                "match_type": verse.get("match_type", ""),
+                "displayed_at": time.time(),
+            })
+            if self._history_panel is not None:
+                self._history_panel.refresh()
         else:
             self._live_ref_lbl.setText("")
             self._live_text_lbl.setText("")

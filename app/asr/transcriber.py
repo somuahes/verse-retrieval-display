@@ -145,13 +145,21 @@ class Config:
 
     # ── Signal-driven segmentation ──────────────────────────
     # A sustained silence of this length marks the end of an utterance —
-    # the trigger for dispatching it to transcription. This is the
-    # dominant fixed cost in the latency budget (bigger than decode time
-    # itself), so it's the first thing to reach for when tuning speed.
-    # Lowered from 450ms — still enough to not be tripped by a normal
-    # mid-sentence breath, but tighter than before. Lower further only
-    # against real testing: too low starts cutting speech off mid-word.
-    endpoint_silence_ms: int = 350
+    # the trigger for dispatching it to transcription. Every utterance
+    # pays this in full before decode even starts, so it's the first
+    # thing to reach for when tuning speed — unlike beam_size, which was
+    # measured directly on this machine (3 beam sizes x 4 runs each,
+    # base.en, CPU int8) and showed NO reliable difference (938ms / 983ms
+    # / 880ms for beam_size 5/4/3 — noise, not a trend), so it was left
+    # alone rather than traded away for a speed win that isn't real here.
+    # Lowered 450->350->250ms across two sessions. 250, not lower, because
+    # this is exactly the same kind of unverified-against-real-audio
+    # change every prior tuning of this constant has been (see this
+    # file's own recurring caveat) — 100ms further off an already-tight
+    # value risks clipping real speech with no real audio in this
+    # environment to catch it if it does. Lower further only against real
+    # testing.
+    endpoint_silence_ms: int = 250
     # Hard cap so one long uninterrupted run of speech (no pauses) still
     # gets chunked and dispatched rather than growing unbounded.
     max_utterance_seconds: float = 10.0
@@ -169,7 +177,12 @@ class Config:
     # has this much context, normal endpoint_silence_ms applies again, so
     # a genuinely fast speaker's segmentation is unaffected.
     min_context_seconds: float = 0.9
-    short_utterance_grace_ms: float = 700.0
+    # Scaled down proportionally with endpoint_silence_ms above (was
+    # 700ms against a 350ms endpoint_silence_ms, same ~2x ratio here) —
+    # short utterances (a bare verse number, "Amen") still get
+    # meaningfully longer than normal to keep merging into the same
+    # utterance if the speaker resumes, just not as long as before.
+    short_utterance_grace_ms: float = 500.0
 
     # ── Fast-speech soft cut (continuous, no natural pause) ────────────
     # How many trailing audio blocks _finalize_soft_cut searches for the
@@ -526,6 +539,28 @@ class BibleAITranscriber:
             "Each utterance's audio will be sent to Groq's API.\n"
         )
 
+        self._warm_up_cloud_connection()
+
+    def _warm_up_cloud_connection(self):
+        """Fires one throwaway request at startup so the TLS/HTTP
+        connection to Groq is already established before the first real
+        utterance needs it. Measured directly on this machine: the first
+        request on a fresh client pays a real, one-time connection-setup
+        cost (585-1337ms observed) that every later request on the same
+        client doesn't (settles to ~440-500ms) — without this, that whole
+        extra cost lands on whatever utterance happens to be first (or
+        first after a long enough gap that the connection dropped), which
+        is exactly the "it waits for something" pattern reported live.
+        Best-effort: a failure here (no internet yet, key not valid) just
+        means the first real utterance pays the same cost it always would
+        have — _decode_cloud's own error handling and _fallback_to_local
+        are unaffected either way, so this never blocks startup."""
+        try:
+            dummy = np.zeros(1600, dtype=np.float32)
+            self._decode_cloud(dummy)
+        except Exception as e:
+            log.debug("Cloud connection warm-up skipped: %s", e)
+
     def _rms(self, audio: np.ndarray) -> float:
         if audio.size == 0:
             return 0.0
@@ -611,6 +646,12 @@ class BibleAITranscriber:
         return all(w.isdigit() or w in _NUMBER_WORDS for w in words)
 
     def _is_bad_output(self, text: str) -> bool:
+        """True only for genuinely empty output. Every other heuristic
+        below (too short, known filler phrase, repetition loop) used to
+        drop the utterance outright — now it only logs, since each one
+        was confirmed to also catch real, legitimately short or unusually
+        -phrased speech (a spoken verse reference among them) with no
+        trace left anywhere once dropped."""
         if not text:
             return True
 
@@ -618,7 +659,11 @@ class BibleAITranscriber:
             self._word_count(text) < self.config.min_words
             and not self._is_bare_number(text)
         ):
-            return True
+            log.warning(
+                "%d word(s), below min_words=%d floor (and not a bare "
+                "number) — keeping anyway: %r",
+                self._word_count(text), self.config.min_words, text[:80],
+            )
 
         bad_outputs = {
             "thank you for watching",
@@ -633,9 +678,12 @@ class BibleAITranscriber:
 
         cleaned = text.lower().strip(" .,!?:;")
         if cleaned in bad_outputs:
-            return True
+            log.warning("Matches known filler output — keeping anyway: %r", text[:80])
 
-        return self._has_repetition_loop(text)
+        if self._has_repetition_loop(text):
+            log.warning("Repetition loop — keeping anyway: %r", text[:80])
+
+        return False
 
     def _has_repetition_loop(self, text: str) -> bool:
         """Third layer of defense against the decode-loop failure mode
@@ -802,26 +850,29 @@ class BibleAITranscriber:
 
     def _passes_segment_gates(self, raw: str, avg_logprob, no_speech_prob,
                                compression_ratio) -> bool:
-        """Shared anti-hallucination gates, applied identically regardless
-        of which backend produced the segment (see module docstring)."""
-        # Was tightened to -1.0 / 0.70 (from -1.4 / 0.90) to favor dropping
-        # a low-confidence segment over risking a hallucinated one reaching
-        # the Bible-matching pipeline — but real sermon audio showed that
-        # traded too far the other way: quiet or emphasis-toned genuine
-        # speech was scoring in this same range and getting silently
-        # dropped (whole real sentences missing from the transcript, no
-        # garbled trace, because a dropped segment just vanishes by
-        # design). Eased back partway to -1.2 / 0.80 now that _has_speech
-        # (a proper Silero VAD pass, not just an RMS threshold) screens out
-        # true silence/ambient-noise clips BEFORE they ever reach the
-        # decoder — the main hallucination risk this gate was guarding
-        # against is now caught earlier, so it can afford to be less
-        # trigger-happy on genuine, merely-quiet speech.
+        """Anti-hallucination signals, applied identically regardless of
+        which backend produced the segment (see module docstring). Logs
+        every low-confidence/repetitive/echoed segment it sees, but no
+        longer drops any of them — real, quiet, or unusually-phrased
+        speech (a spoken verse reference among them) was being silently
+        discarded with zero trace, which is worse than letting an
+        occasional genuine hallucination reach the transcript. See
+        _is_bad_output for the equivalent utterance-level change."""
         if avg_logprob is not None and avg_logprob < -1.2:
-            return False
+            log.warning(
+                "Low decode confidence — avg_logprob %.2f below -1.20, "
+                "keeping anyway: %r",
+                avg_logprob,
+                raw[:80],
+            )
 
         if no_speech_prob is not None and no_speech_prob > 0.80:
-            return False
+            log.warning(
+                "Possible non-speech — no_speech_prob %.2f above 0.80, "
+                "keeping anyway: %r",
+                no_speech_prob,
+                raw[:80],
+            )
 
         # A highly repetitive segment ("hey, hey, hey, ...") gzip-
         # compresses far better than real speech, so a high ratio here is
@@ -833,21 +884,19 @@ class BibleAITranscriber:
             and compression_ratio > self.config.compression_ratio_threshold
         ):
             log.warning(
-                "Dropped segment — compression ratio %.2f exceeds %.2f "
-                "(likely a repetition loop): %r",
+                "High compression ratio %.2f exceeds %.2f (possible "
+                "repetition loop), keeping anyway: %r",
                 compression_ratio,
                 self.config.compression_ratio_threshold,
                 raw[:80],
             )
-            return False
 
         if self._is_prompt_echo(raw):
             log.warning(
-                "Dropped segment — echoes the configured initial_prompt "
-                "instead of real speech: %r",
+                "Echoes the configured initial_prompt — possibly not "
+                "real speech, keeping anyway: %r",
                 raw[:80],
             )
-            return False
 
         return True
 

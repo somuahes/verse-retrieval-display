@@ -11,6 +11,30 @@ written). Historical build narrative — what was tried, reverted, and why —
 lives in `PROGRESS.md`; this file is a snapshot of what the code does
 *right now*.
 
+**Addendum, 2026-08-07** (UI layer only — ASR/retrieval sections below are
+unchanged from 2026-08-01 and were not re-verified this pass): §3.4 and §2
+updated for four new Operator Panel features (Browse, Session History,
+Queue reorder/save-load, Save-Image) and a `tests/` integration suite —
+see `PROGRESS.md` §22 for the full narrative.
+
+**Addendum, 2026-08-14** (retrieval + ASR — not a full regeneration, read
+this alongside the sections below rather than in place of them): three
+real false-positive classes were found and fixed via live testing —
+`semantic.py`'s phrase_map/event_map curated shortcuts firing at an
+unconditional 100% confidence with no context check (§3.2's description
+of the display-threshold math is otherwise unchanged), `version_detector.py`'s
+`NAV_MAP` triggering PREV/NEXT/REPEAT navigation on ordinary rhetorical
+preaching speech (§3.2's "two silent no-op bugs fixed" note is a
+different, earlier issue — this is a new one), and a semantic false
+positive when a forced `max_utterance_seconds` cut splits one paraphrase
+into two independently-scored fragments. Also: `endpoint_silence_ms`
+350→250ms, a Groq cloud connection warm-up at startup, and a real,
+pre-existing accuracy gap found on the stress/generalization test sets
+(74.5%/64.5% against a documented 81.8%/77.4% baseline, confirmed not
+caused by this session's changes) that §4/§5 below have not been updated
+to reflect. Full narrative, every measurement, and what's still open:
+`PROGRESS.md` §25.
+
 ---
 
 ## 1. What the system is
@@ -61,6 +85,8 @@ Microphone ──▶ BibleAITranscriber (Groq cloud primary, local fallback)
                         │
                         ▼
       Operator UI (main_ui.py) — Preview / Queue / AI Detections
+        │  also opens: Browse (click Book→Chapter→Verse),
+        │  Session History (verses actually pushed live), Theme Designer
                         │  (operator clicks ▶ / Go Live)
                         ▼
         DisplayWindow (projector view, windowed by default, themeable)
@@ -221,11 +247,49 @@ revisited).
 
 ### 3.4 UI — `app/ui/main_ui.py` (canonical)
 
-Unchanged in layout from the prior session. The manual/unified search box
-(`_book_mode_lookup`) now respects the same Twi language gating as the
-voice pipeline (§3.2) — typing a Twi book name while on an English version
-behaves the same as saying it would: it doesn't resolve, rather than
-silently displaying English text for a Twi-named reference.
+Core layout/engine wiring unchanged from the prior session. The manual/
+unified search box (`_book_mode_lookup`) respects the same Twi language
+gating as the voice pipeline (§3.2) — typing a Twi book name while on an
+English version behaves the same as saying it would: it doesn't resolve,
+rather than silently displaying English text for a Twi-named reference.
+
+**Four features added 2026-08-07**, all UI-layer only — no change to
+`HybridEngine`'s matching/decision logic:
+
+- **Queue reorder + save/load.** ▲/▼ per row reorders in place; Save…/
+  Load… persist the Queue as a JSON program-list file (default folder
+  `programs/`, mirroring `themes/`). Persistence logic lives in the new
+  `app/ui/queue_store.py`, not inline in the click handler — testable
+  without driving a real file-picker dialog.
+- **Save current slide as image.** `🖼 Save Image` on the Live Output card
+  grabs the projector window (`DisplayWindow.grab()`) to a PNG, named
+  after the reference by default.
+- **Session History window** (`app/ui/history_window.py`) — every verse
+  actually pushed live this run (distinct from AI Detections, which caps
+  at 30 and includes verses never sent live), with Refresh/Export
+  (JSON/CSV/TXT)/Clear.
+- **Browse window** (`app/ui/browser_window.py`) — click Book → Chapter →
+  Verse instead of typing a reference; a chapter-preview pane (all verses,
+  each individually sendable) closes the one interaction gap the unified
+  Search box didn't cover. Reads the database only through three new
+  `hybrid.py` functions — `db_list_books`, `db_chapter_count`,
+  `db_get_chapter` — added as thin, unindexed-logic query wrappers
+  alongside the existing `db_get_verse`/`db_get_next_verse`/etc.; nothing
+  in the matching/decision pipeline was touched.
+
+**Visual identity**: `app/ui/style_kit.py` (new) — one shared dark/gold
+palette, QSS helpers, and a generated app icon, used by every secondary
+window (Browse, History) so the app has one consistent identity instead
+of each window styling itself independently. The Theme Designer is
+intentionally left on its own plain chrome (a properties-inspector-style
+tool, same precedent as before).
+
+**Test coverage, new this session**: `tests/` (39 cases, 4 files) plus a
+root `conftest.py` — exercises the Queue/History/Browse/Save-Image
+features above against the real `HybridEngine` and real `bible.db`, not
+mocks. See `PROGRESS.md` §22 for the full run and a genuine bug the test
+suite surfaced along the way (a Windows DLL-load-order conflict between
+PyQt5 and torch when both are imported in one pytest process).
 
 ### 3.5 Evaluation — `app/evaluation/`
 

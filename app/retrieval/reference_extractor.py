@@ -338,6 +338,43 @@ def extract_all_references_verbose(
     return _extract_all_references_verbose(text, allowed_languages)
 
 
+def extract_book_only(
+    text: str, allowed_languages: Optional[Iterable[str]] = None
+) -> Optional[str]:
+    """A book name mentioned with no chapter/verse number anywhere in the
+    utterance at all — e.g. "in the book of Romans, he talks about how we
+    should live." extract_reference/extract_reference_verbose return None
+    here (there's no chapter to anchor a reference on), so a caller that
+    wants to at least scope a semantic search to the named book — rather
+    than treating "Romans" as if it were never mentioned — has no other
+    way to find that book name. Reuses the same alias-scanning table
+    (bundle.aliases_by_first_word) the token scanner in
+    _extract_all_references_verbose uses, rather than a second copy of
+    the alias-matching logic; this function only skips the "must be
+    followed by a number" requirement that makes this a chapter/verse
+    extractor rather than a book-name finder. Returns the canonical book
+    name of the FIRST book alias found (deliberately not "the last", so a
+    sentence naming one book stays unambiguous even if a later word
+    happens to collide with a different short alias), or None if no book
+    is named at all."""
+    if not text:
+        return None
+
+    bundle = _get_bundle(allowed_languages)
+    normalised = _text_normalise(text, bundle)
+    words = normalised.split()
+
+    i = 0
+    while i < len(words):
+        for alias, alias_words in bundle.aliases_by_first_word.get(words[i], ()):
+            n = len(alias_words)
+            if i + n <= len(words) and words[i:i + n] == alias_words:
+                return bundle.book_aliases[alias]
+        i += 1
+
+    return None
+
+
 # Structural words that appear as literal boilerplate in every verse's own
 # embedding text (see semantic.py's build_embedding_text: "{book} chapter
 # {chapter} verse {verse}. {text}") — left in a query, they trivially

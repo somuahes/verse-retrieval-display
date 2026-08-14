@@ -23,19 +23,11 @@ for _lang in _LANGUAGES:
 
 
 # ════════════════════════════════════════════════════════════
-#  AMBIGUOUS PREV PHRASES
-#
-#  These phrases map to PREV in NAV_MAP but are short or
-#  common enough that they can appear as casual speech in a
-#  live sermon ("go back to what I was saying", congregation
-#  chatting, etc.).
-#
-#  The hybrid engine uses nav_requires_confirm() to decide
-#  whether to require the phrase to appear TWICE in consecutive
-#  transcripts before executing the PREV navigation.
-#
-#  Explicit phrases like "previous verse" or "go to previous
-#  verse" are long and unambiguous enough to fire immediately.
+#  AMBIGUOUS PREV PHRASES — short/common enough to appear as casual
+#  speech ("go back to what I was saying"). hybrid.py's
+#  nav_requires_confirm() requires these to repeat across two
+#  consecutive transcripts before firing; explicit phrases like
+#  "previous verse" fire immediately.
 # ════════════════════════════════════════════════════════════
 PREV_CONFIRM_PHRASES: set = {
     "go back",
@@ -57,15 +49,11 @@ def nav_requires_confirm(text: str) -> bool:
         "go to previous verse"       → False (explicit, fire directly)
     """
     t = text.lower().strip()
-    # Longest-phrase-wins, mirroring detect_navigation()'s own algorithm —
-    # a plain "phrase in t" substring check was wrong: "go to previous" is
-    # a genuine, word-bounded PREFIX of "go to previous verse", so it
-    # always matched there too and incorrectly demanded confirmation for
-    # an explicit, unambiguous phrase. Finding whichever NAV_MAP phrase
-    # would ACTUALLY fire first (same rule detect_navigation uses) and
-    # checking THAT one against PREV_CONFIRM_PHRASES is the only way to
-    # tell "go to previous" alone apart from it being a prefix of a longer
-    # explicit phrase.
+    # Longest-phrase-wins, mirroring detect_navigation() — a plain
+    # substring check wrongly matched "go to previous" as a prefix of
+    # "go to previous verse", demanding confirmation for an explicit
+    # phrase. Checking whichever NAV_MAP phrase would actually fire first
+    # is the only way to tell them apart.
     for phrase in sorted(NAV_MAP, key=len, reverse=True):
         if re.search(rf"\b{re.escape(phrase)}\b", t):
             return phrase in PREV_CONFIRM_PHRASES
@@ -84,30 +72,11 @@ def _normalise_numbers(text: str) -> str:
 
 
 # ════════════════════════════════════════════════════════════
-#  RANGE DETECTION
-#
-#  Human preachers say ranges in MANY ways:
-#
-#  "verse 1 to 5"
-#  "verse 1 through 5"
-#  "verse 1 through to 5"
-#  "verse 1 down to verse 5"
-#  "verses 1 to 5"
-#  "verses 1 through to 5"
-#  "from verse 1 to verse 5"
-#  "from verse 1 all the way to verse 5"
-#  "verse 1 up to verse 5"
-#  "verse 1 unto verse 5"
-#  "John 1 verse 1 to 5"
-#  "John chapter 1 verses 1 to 5"
-#  "read from verse 1 to 5"
-#  "let us read verses 1 to 5"
-#  "starting at verse 1 ending at verse 5"
-#  "starting from verse 1 to verse 5"
-#  "we will read verse 1 and continue to verse 5"
-#  "verse one to five"   ← word-form numbers
-#
-#  All normalised to (start_int, end_int).
+#  RANGE DETECTION — handles the many ways preachers say a range
+#  ("verse 1 to 5", "verses 1 through to 5", "from verse 1 all the way
+#  to verse 5", "starting at verse 1 ending at verse 5", word-form
+#  numbers like "verse one to five", etc). All normalised to
+#  (start_int, end_int).
 # ════════════════════════════════════════════════════════════
 
 # The connectors between start and end verse numbers

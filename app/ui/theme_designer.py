@@ -420,7 +420,7 @@ class ThemeDesigner(QMainWindow):
         if not ok or not name.strip():
             return
         name = name.strip()
-        if name in theme_store.list_themes():
+        if theme_store.name_in_use(name):
             QMessageBox.warning(self, "Name in use", "A theme with that name already exists.")
             return
         theme_store.save_theme(Theme(name=name))
@@ -442,7 +442,11 @@ class ThemeDesigner(QMainWindow):
             self, "Rename Theme", "New name:", text=self._current_name)
         if not ok or not new_name.strip() or new_name == self._current_name:
             return
-        renamed = theme_store.rename_theme(self._current_name, new_name.strip())
+        new_name = new_name.strip()
+        if theme_store.name_in_use(new_name, exclude_name=self._current_name):
+            QMessageBox.warning(self, "Name in use", "A theme with that name already exists.")
+            return
+        renamed = theme_store.rename_theme(self._current_name, new_name)
         if renamed:
             self._refresh_library()
             self._load_theme(renamed.name)

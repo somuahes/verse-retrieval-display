@@ -122,17 +122,27 @@ def build_database():
     print("=" * 50)
 
     conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
+    try:
+        cursor = conn.cursor()
 
-    create_tables(cursor)
+        create_tables(cursor)
+        conn.commit()
 
-    grand_total = 0
-    for v in VERSIONS:
-        print(f"\n📖 Importing {v['code']} ({v['full_name']})...")
-        grand_total += import_version(cursor, v)
-
-    conn.commit()
-    conn.close()
+        grand_total = 0
+        for v in VERSIONS:
+            print(f"\n📖 Importing {v['code']} ({v['full_name']})...")
+            grand_total += import_version(cursor, v)
+            # Committed per-version, not once at the very end — a
+            # malformed later version's exception would otherwise leave
+            # every earlier version's import uncommitted (silently
+            # rolled back when conn is closed/GC'd) instead of just
+            # aborting the run with what succeeded so far intact.
+            conn.commit()
+    finally:
+        # Always closed, even on a mid-import exception — an unclosed
+        # connection can leave bible.db locked on Windows until the
+        # interpreter exits.
+        conn.close()
 
     print("\n" + "=" * 50)
     print(f"  ✅ DATABASE READY")

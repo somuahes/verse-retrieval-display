@@ -37,4 +37,9 @@ def load_queue(path: str) -> List[Dict]:
         data = json.load(f)
     if not isinstance(data, list):
         return []
-    return list(data)
+    # A syntactically valid JSON list with the wrong element shape (a
+    # hand-edited program file, e.g. a flat list of strings) is not
+    # caught by the caller's json.JSONDecodeError guard — silently
+    # skip non-dict entries here instead of letting them crash later,
+    # deep inside the queue panel's rendering code.
+    return [entry for entry in data if isinstance(entry, dict)]

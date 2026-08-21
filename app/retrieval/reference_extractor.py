@@ -77,6 +77,7 @@ class _LangBundle:
     tens: set = field(default_factory=set)
     number_phrase: str = r"\d{1,3}"
     structural_words: dict = field(default_factory=dict)
+    bare_mention_blocklist: set = field(default_factory=set)
 
 
 def _build_bundle(languages: FrozenSet[str]) -> _LangBundle:
@@ -90,10 +91,21 @@ def _build_bundle(languages: FrozenSet[str]) -> _LangBundle:
         b.small_numbers.update(_lang.SMALL_NUMBERS)
         b.tens.update(_lang.TENS)
         b.structural_words.update(_lang.STRUCTURAL_WORDS)
+        b.bare_mention_blocklist.update(_lang.BARE_MENTION_BLOCKLIST)
 
     b.book_pattern = "|".join(
         sorted(map(re.escape, b.book_aliases.keys()), key=len, reverse=True)
     )
+    # An empty book_pattern ("" — e.g. `languages` is an empty/unknown
+    # set) would otherwise embed as `\b()\s+...` in strong_patterns
+    # below: an empty capture group matches zero-width at any word
+    # boundary, silently deleting the "a book name is required" contract
+    # and turning any bare "N:M"-shaped text (times, scores, ratios)
+    # into a fake reference with an empty book. `(?!)` never matches
+    # anything, so an empty/unrecognized language set correctly finds no
+    # references instead of fabricating one.
+    if not b.book_pattern:
+        b.book_pattern = r"(?!)"
 
     # See the module-level docstring on the old _ALIASES_BY_FIRST_WORD
     # this replaced: grouped by first word so the token scanner only
@@ -173,15 +185,40 @@ def _text_normalise(text: str, bundle: _LangBundle) -> str:
     # Matthew 6.33 -> Matthew 6:33
     text = re.sub(r"(?<=\d)\.(?=\d)", ":", text)
 
-    text = re.sub(r"[,;]", " ", text)
-
     # Replaces any language's chapter/verse marker word ("chapters", or
     # Twi's "ti"/"nkyekyɛmu", ...) with the literal canonical word, so
     # the regex patterns below only ever need to look for "chapter"/
     # "verse" regardless of which language marked them. See
-    # aliases_en.py/aliases_twi.py's STRUCTURAL_WORDS.
+    # aliases_en.py/aliases_twi.py's STRUCTURAL_WORDS. Must run BEFORE
+    # the period-stripping step below — several entries are abbreviations
+    # with a literal trailing period ("v.", "verse no.", "chapter no.");
+    # stripping periods first left no period for those keys to ever
+    # match, silently making them dead code (confirmed live: "John 3 v.
+    # 16" parsed as John 3:1, verse silently dropped to the default).
+    #
+    # Trailing boundary is `(?!\w)`, not `\b` — for an entry ending in a
+    # word character ("chapters") the two are equivalent, but for one
+    # ending in punctuation ("v.", "verse no.") `\b` can never actually
+    # match: "." and the space after it are both non-word characters, so
+    # there's no word/non-word transition for `\b` to anchor on at that
+    # position, which was silently defeating the substitution even after
+    # fixing the ordering above. `(?!\w)` just asserts "not glued to a
+    # following word character," which is what "end of this phrase"
+    # actually means here regardless of what the phrase itself ends in.
     for wrong, right in bundle.structural_words.items():
-        text = re.sub(rf"\b{re.escape(wrong)}\b", right, text)
+        text = re.sub(rf"\b{re.escape(wrong)}(?!\w)", right, text)
+
+    # Any period left at this point is not a decimal separator (the
+    # digit.digit case above already consumed those) and not a known
+    # abbreviation (the loop above already consumed those) — it's
+    # ordinary sentence punctuation, most commonly a trailing full stop.
+    # Left alone, it stays glued to the token before/after it after the
+    # word-level tokenizer's plain text.split() below (e.g. "2." at the
+    # end of "Revelation chapter 2."), which fails _parse_number_at's
+    # str.isdigit() check and silently drops the whole reference — a
+    # confirmed live miss on exactly that phrase. Stripped the same way
+    # commas/semicolons already are.
+    text = re.sub(r"[,;.]", " ", text)
 
     text = text.replace(":", " : ")
     text = text.replace("-", " - ")
@@ -356,7 +393,13 @@ def extract_book_only(
     name of the FIRST book alias found (deliberately not "the last", so a
     sentence naming one book stays unambiguous even if a later word
     happens to collide with a different short alias), or None if no book
-    is named at all."""
+    is named at all. Skips bundle.bare_mention_blocklist entries — some
+    aliases (e.g. "africans"/"african" for "Ephesians", see
+    aliases_en.py's BARE_MENTION_BLOCKLIST) exist purely as ASR-
+    mishearing tolerance and are also ordinary English words; without a
+    number to anchor on the way the full reference extractor requires,
+    an unrelated sentence merely containing one of those words would
+    otherwise scope a semantic search to a book nobody actually meant."""
     if not text:
         return None
 
@@ -367,6 +410,8 @@ def extract_book_only(
     i = 0
     while i < len(words):
         for alias, alias_words in bundle.aliases_by_first_word.get(words[i], ()):
+            if alias in bundle.bare_mention_blocklist:
+                continue
             n = len(alias_words)
             if i + n <= len(words) and words[i:i + n] == alias_words:
                 return bundle.book_aliases[alias]

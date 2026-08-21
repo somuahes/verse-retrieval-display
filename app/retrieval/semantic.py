@@ -688,7 +688,13 @@ class SemanticEngine:
 
         for phrase, ref in mapping.items():
             p = clean_text(phrase)
-            if p in q and len(p) > best_len:
+            # Word-boundary match, not plain substring containment — a
+            # naive `p in q` matches "lost sheep" inside "lost sheepdog"
+            # (see the identical fix/rationale on detect_version's phrase
+            # matching in version_detector.py). event_map entries in
+            # particular are common English word sequences that can
+            # appear as part of a longer, unrelated word.
+            if re.search(rf"\b{re.escape(p)}\b", q) and len(p) > best_len:
                 best = (phrase, ref)
                 best_len = len(p)
 

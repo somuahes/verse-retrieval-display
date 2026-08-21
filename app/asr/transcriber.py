@@ -57,16 +57,25 @@ Whisper API (https://console.groq.com, GROQ_API_KEY env var) as the
 PRIMARY backend whenever a key is configured, by deliberate choice — not
 just a fallback for GPU-less machines. Local (GPU if usable, else CPU)
 is only used when no key is set. GPU usability itself is validated with
-a real dummy forward pass at load time (see _build_local_model) — a
-device being *detected* (ctranslate2.get_cuda_device_count() > 0)
-doesn't mean it's actually usable; the CUDA runtime libraries can be
-missing even with a working driver, which only surfaces as a
-RuntimeError once real inference is attempted, not at model
-construction. "local" / "cloud" force one path explicitly. Segment-level
-anti-hallucination gates (avg_logprob, no_speech_prob, compression_ratio,
-prompt-echo) are applied identically on both paths, since Groq's
-verbose_json response includes the same per-segment fields faster-whisper
-does.
+a real dummy forward pass at load time (see
+app/asr/backends/local_whisper.py's load()) — a device being *detected*
+(ctranslate2.get_cuda_device_count() > 0) doesn't mean it's actually
+usable; the CUDA runtime libraries can be missing even with a working
+driver, which only surfaces as a RuntimeError once real inference is
+attempted, not at model construction. "local" / "cloud" force one path
+explicitly. Segment-level anti-hallucination gates (avg_logprob,
+no_speech_prob, compression_ratio, prompt-echo) are applied identically
+regardless of which backend produced a segment (see _apply_gates below),
+since Groq's verbose_json response includes the same per-segment fields
+faster-whisper does, and a backend with no per-segment confidence data at
+all can just pass None for those fields.
+
+Each backend is its own class in app/asr/backends/ (local_whisper.py,
+groq_cloud.py, ...), wired in through BACKEND_REGISTRY
+(app/asr/backends/registry.py) — adding a new backend (a new language's
+ASR service, say) means adding one file there and one registry entry,
+never editing this file. See app/asr/backends/khaya.py and w2vbert.py
+for placeholder Twi backends awaiting a real implementation.
 
 Runtime recovery: if a cloud request fails mid-session (network drop,
 outage, rate limit — effectively "no internet"), _fallback_to_local
@@ -75,11 +84,13 @@ restart needed. Unlike a one-way circuit breaker, this isn't permanent —
 _should_probe_cloud/_recover_to_cloud periodically retry cloud in the
 background (Config.cloud_retry_interval_s) and switch back automatically
 the moment a probe succeeds, so a session started with cloud as primary
-returns to cloud on its own once internet/Groq comes back.
+returns to cloud on its own once internet/Groq comes back. This
+fallback/recovery pairing is specific to the cloud+local pair (an
+explicit-only backend like khaya has no fallback — see
+app/asr/backends/base.py's auto_eligible).
 """
 
 import argparse
-import io
 import logging
 import os
 import re
@@ -87,13 +98,13 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Callable, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import numpy as np
 import sounddevice as sd
-import soundfile as sf
-from faster_whisper import WhisperModel
 from faster_whisper.vad import VadOptions, get_speech_timestamps
+
+from app.asr.backends import ASRBackend, BACKEND_REGISTRY, RawSegment
 
 log = logging.getLogger(__name__)
 
@@ -119,14 +130,25 @@ class Config:
     # "auto" resolves to "float16" on cuda, "int8" on cpu.
     compute_type: str = "auto"
 
-    # "auto" | "local" | "cloud" — see module docstring.
+    # "auto" or any key in app.asr.backends.registry.BACKEND_REGISTRY
+    # ("local", "cloud", plus explicit-only placeholders "khaya"/
+    # "w2vbert" -- see that package). "auto" only ever picks between
+    # backends with auto_eligible=True (currently local/cloud) -- see
+    # module docstring.
     backend: str = "auto"
-    # Full large-v3, not "-turbo" — Groq's API doesn't expose beam_size/
-    # best_of the way local faster-whisper does, so model choice is the
-    # only real accuracy lever left for the cloud path. Turbo trades
-    # accuracy for speed, but Groq's LPU hardware makes even the full
-    # model fast, so that trade isn't worth it once cloud is the primary
-    # backend rather than a speed-driven fallback.
+    # Reverted back to full large-v3 (from "-turbo") on operator request
+    # after a real-session accuracy concern — see PROGRESS.md/session
+    # notes for the transcript. Turbo was tried for its lower round-trip
+    # latency (1.4-2.5s measured for full large-v3 vs. Groq's LPU
+    # hardware making even that fast enough to blow the 2s end-to-end
+    # budget), but the actual issue investigated turned out to be a
+    # reference-matching bug (app/retrieval/hybrid.py's version-switch
+    # step swallowing a reference spoken in the same utterance, now
+    # fixed), not ASR quality — this reversion is a deliberate choice to
+    # prioritize accuracy over that latency margin, not a finding that
+    # turbo was actually at fault. Groq's API still doesn't expose
+    # beam_size/best_of the way local faster-whisper does, so model
+    # choice remains the only real lever on this path.
     groq_model: str = "whisper-large-v3"
     # Falls back to the GROQ_API_KEY env var when None.
     groq_api_key: Optional[str] = None
@@ -161,8 +183,15 @@ class Config:
     # testing.
     endpoint_silence_ms: int = 250
     # Hard cap so one long uninterrupted run of speech (no pauses) still
-    # gets chunked and dispatched rather than growing unbounded.
-    max_utterance_seconds: float = 10.0
+    # gets chunked and dispatched rather than growing unbounded. Lowered
+    # from 10.0 -> 6.0: a continuously-speaking preacher who never pauses
+    # past endpoint_silence_ms previously got NOTHING dispatched to
+    # decode for up to 10s straight — worst-case latency for that speech
+    # pattern, not just the normal endpoint-triggered path. 6.0 still
+    # gives _finalize_soft_cut a real syllable gap to find (its lookback
+    # window is only ~500ms) and enough audio for decode context, while
+    # roughly halving that worst case.
+    max_utterance_seconds: float = 6.0
     # Below this, a "speech" blip is almost certainly a click/pop, not a
     # real utterance — skip transcribing it entirely.
     min_utterance_seconds: float = 0.35
@@ -282,7 +311,6 @@ class BibleAITranscriber:
     def __init__(self, config: Optional[Config] = None):
         self.config = config or Config()
 
-        self._groq_client = None
         self.backend = self._resolve_backend()
         # The backend chosen at startup — self.backend can drop to "local"
         # at runtime after a cloud failure (see _fallback_to_local), but
@@ -290,11 +318,22 @@ class BibleAITranscriber:
         # worth trying to recover back to cloud at all.
         self._preferred_backend = self.backend
         self._next_cloud_retry_at = 0.0
+        # Guards backend construction against running twice concurrently
+        # — the background prewarm (_warm_up_local_fallback) and a real
+        # runtime fallback (_ensure_backend_ready) can otherwise both
+        # start loading the same backend at once. Harmless either way
+        # (both produce an equally valid instance), just wasted work; the
+        # lock avoids it.
+        self._local_init_lock = threading.Lock()
+        # Loaded backend instances, keyed by registry name — see
+        # _ensure_backend_ready/decode(). Populated eagerly for the
+        # startup backend below, lazily for a cloud session's local
+        # fallback.
+        self._backend_instances: Dict[str, ASRBackend] = {}
+        self._backend_instances[self.backend] = self._build_and_load(self.backend)
 
         if self.backend == "cloud":
-            self._init_cloud_backend()
-        else:
-            self._init_local_backend()
+            self._warm_up_local_fallback()
 
         # ── Endpointing state — touched only from the sounddevice audio
         # callback thread, which sounddevice guarantees is never called
@@ -316,10 +355,33 @@ class BibleAITranscriber:
         self.stream = None
         self.callback_fn: Optional[Callable[[str], None]] = None
 
+        # Bumped by every start()/stop() — a decode captures the value
+        # current at submit time (see _finalize) and _transcribe_utterance
+        # only delivers its result if it's unchanged when the decode
+        # finishes. stop_event alone isn't enough to prevent a stale
+        # in-flight decode from a just-stopped session leaking into a
+        # NEW session started before that decode finishes (a quick
+        # stop-then-start toggle, well within a Whisper/Groq round-trip
+        # time) — stop_event.clear() in start() would make that stale
+        # decode's guard pass again. Bumping on both ends means a decode
+        # only ever delivers into the exact session it was submitted
+        # under, stopped or not, restarted or not.
+        self._session_id = 0
+
         # Bounded pool for per-utterance decode dispatch — see _finalize().
         # self._dispatch_workers tracks the size actually in use so
         # _resize_executor_for_backend (called after a runtime cloud<->
-        # local switch) knows whether a resize is even needed.
+        # local switch) knows whether a resize is even needed. Guards
+        # self._executor itself (not decode work, which runs ON the
+        # executor's own threads and never holds this) — _finalize's
+        # submit() (audio-callback thread) and _resize_executor_for_
+        # backend's/stop()'s swap-and-shutdown (a decode thread / the UI
+        # thread) could otherwise interleave: a submit() reading
+        # self._executor right as a resize/stop swaps it out and shuts
+        # the old one down races calling .submit() on an already-
+        # shutdown pool, which raises inside the sounddevice callback —
+        # fatal to the audio stream.
+        self._executor_lock = threading.Lock()
         self._dispatch_workers = self._dispatch_worker_count()
         self._executor = ThreadPoolExecutor(
             max_workers=self._dispatch_workers,
@@ -332,23 +394,37 @@ class BibleAITranscriber:
     def set_callback(self, fn: Callable[[str], None]):
         self.callback_fn = fn
 
-    def _cuda_available(self) -> bool:
-        """Checked via ctranslate2 itself, not nvidia-smi — a GPU can be
-        physically present and still unusable by WhisperModel if the CUDA
-        runtime libraries ctranslate2 needs aren't installed, so asking
-        ctranslate2 directly is the only check that reflects reality."""
-        try:
-            import ctranslate2
-            return ctranslate2.get_cuda_device_count() > 0
-        except Exception:
-            return False
+    def _build_and_load(self, name: str) -> ASRBackend:
+        backend = BACKEND_REGISTRY[name](self.config)
+        backend.load()
+        return backend
+
+    def _ensure_backend_ready(self, name: str) -> bool:
+        """Lazily builds+loads a backend the first time it's actually
+        needed (e.g. a cloud-primary session never pays local's load cost
+        unless/until cloud actually fails). Returns whether it's ready.
+        Safe to call repeatedly/concurrently — no-ops once already
+        loaded."""
+        if name in self._backend_instances:
+            return True
+
+        with self._local_init_lock:
+            if name in self._backend_instances:
+                return True
+            try:
+                self._backend_instances[name] = self._build_and_load(name)
+                return True
+            except Exception as e:
+                log.error("Backend %r failed to initialize: %s", name, e)
+                return False
 
     def _resolve_backend(self) -> str:
         backend = self.config.backend
 
-        if backend not in ("auto", "local", "cloud"):
+        if backend != "auto" and backend not in BACKEND_REGISTRY:
             raise ValueError(
-                f"Config.backend must be 'auto', 'local', or 'cloud', got {backend!r}"
+                f"Config.backend must be 'auto' or one of "
+                f"{sorted(BACKEND_REGISTRY)}, got {backend!r}"
             )
 
         if backend != "auto":
@@ -356,7 +432,10 @@ class BibleAITranscriber:
 
         # Groq is the primary path whenever a key is configured — local
         # (GPU if available, else CPU) is the fallback for sessions/
-        # machines with no key set, not the other way around.
+        # machines with no key set, not the other way around. Only
+        # weighs auto_eligible backends (currently cloud/local, both
+        # English-focused) — a language-specific backend must be
+        # requested explicitly by name, never guessed at by "auto".
         if self.config.groq_api_key or os.environ.get("GROQ_API_KEY"):
             return "cloud"
 
@@ -364,27 +443,26 @@ class BibleAITranscriber:
 
     def _dispatch_worker_count(self) -> int:
         """How many utterances can decode concurrently — sized per
-        backend, not one blanket number, because the two have different
-        bottlenecks. Local decode is CPU-bound (each CTranslate2 decode is
-        already internally multithreaded via cpu_threads), so more worker
-        threads than that just contend for the same cores; 2 matches the
-        realistic concurrency ceiling there (one utterance still decoding
-        while at most one more has just been endpointed or force-cut by
-        max_utterance_seconds).
+        backend, not one blanket number, because io-bound and CPU-bound
+        backends have different bottlenecks. Local decode is CPU-bound
+        (each CTranslate2 decode is already internally multithreaded via
+        cpu_threads), so more worker threads than that just contend for
+        the same cores; 2 matches the realistic concurrency ceiling there
+        (one utterance still decoding while at most one more has just
+        been endpointed or force-cut by max_utterance_seconds).
 
-        Cloud decode is I/O-bound instead — a worker spends almost all of
-        its time blocked waiting on Groq's HTTP response, not touching
-        local CPU at all, so a higher count costs nothing locally.
-        Measured directly against the real API (whisper-large-v3, 2.5s
-        clips): 450-1000ms round-trip, well above what local decode
-        typically takes — at only 2 workers, a fast preacher's utterances
-        can easily endpoint faster than one round-trip completes and
-        queue up behind the cap, adding real, avoidable latency. 4 is a
-        conservative raise (not unbounded — still bounded per the
-        original design's own goal, see the comment on self._executor)
-        rather than a number tuned against a specific, unknown-to-us Groq
-        rate limit."""
-        return 4 if self.backend == "cloud" else 2
+        An I/O-bound backend spends almost all its time blocked waiting
+        on an HTTP response, not touching local CPU at all, so a higher
+        count costs nothing locally. Measured directly against Groq's
+        real API (whisper-large-v3, 2.5s clips): 450-1000ms round-trip,
+        well above what local decode typically takes — at only 2
+        workers, a fast preacher's utterances can easily endpoint faster
+        than one round-trip completes and queue up behind the cap,
+        adding real, avoidable latency. 4 is a conservative raise (not
+        unbounded — still bounded per the original design's own goal,
+        see the comment on self._executor) rather than a number tuned
+        against a specific, unknown-to-us rate limit."""
+        return 4 if self._backend_instances[self.backend].io_bound else 2
 
     def _resize_executor_for_backend(self):
         """Keep the dispatch pool sized for whichever backend is
@@ -399,167 +477,37 @@ class BibleAITranscriber:
         already queued; the old executor just stops accepting new
         submissions and finishes what it already has, while new work
         goes to the freshly-sized one."""
-        target = self._dispatch_worker_count()
-        if target == self._dispatch_workers:
-            return
-        old_executor = self._executor
-        self._dispatch_workers = target
-        self._executor = ThreadPoolExecutor(
-            max_workers=target, thread_name_prefix="bible-ai-transcribe"
-        )
+        with self._executor_lock:
+            target = self._dispatch_worker_count()
+            if target == self._dispatch_workers:
+                return
+            old_executor = self._executor
+            self._dispatch_workers = target
+            self._executor = ThreadPoolExecutor(
+                max_workers=target, thread_name_prefix="bible-ai-transcribe"
+            )
         old_executor.shutdown(wait=False)
 
-    def _init_local_backend(self):
-        project_root = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "..", "..")
-        )
-
-        model_path = os.path.join(
-            project_root,
-            "models",
-            "faster-whisper",
-            self.config.model_size,
-        )
-
-        if not os.path.isdir(model_path):
-            raise FileNotFoundError(
-                f"\nWhisper model folder not found:\n{model_path}\n\n"
-                "Make sure your model is inside:\n"
-                "models/faster-whisper/base.en\n"
-            )
-
-        device = self.config.device
-        if device == "auto":
-            device = "cuda" if self._cuda_available() else "cpu"
-
-        print("\nLoading Faster-Whisper model locally...")
-        print("Model path:", model_path)
-        print("Device:", device)
-
-        try:
-            self.model = self._build_local_model(model_path, device)
-        except (ValueError, RuntimeError) as e:
-            # A CUDA device being *detected* (ctranslate2.get_cuda_device_
-            # count() > 0) doesn't mean it's actually usable — the CUDA
-            # runtime libraries (cuBLAS/cuDNN) can be missing even with a
-            # working driver and a visible GPU, e.g. no CUDA Toolkit and
-            # no nvidia-cublas-cu12/nvidia-cudnn-cu12 pip packages
-            # installed. That failure only surfaces once a real forward
-            # pass runs (see _build_local_model's validation decode), not
-            # at model construction — without this fallback, every single
-            # utterance would silently fail forever (caught by
-            # _transcribe_utterance's broad except), which looks
-            # indistinguishable from "not transcribing at all."
-            if device != "cpu":
-                print(
-                    f"\n[GPU unusable] {e}\n"
-                    "Falling back to CPU for this run. To actually use the "
-                    "GPU, install its CUDA runtime libraries:\n"
-                    "  pip install nvidia-cublas-cu12 nvidia-cudnn-cu12\n"
-                )
-                self.model = self._build_local_model(model_path, "cpu")
-            else:
-                raise
-
-        print("Model loaded successfully.\n")
-
-    def _build_local_model(self, model_path: str, device: str) -> WhisperModel:
-        # Not every CUDA GPU actually supports float16 efficiently — older
-        # (pre-Turing/Pascal-and-earlier) cards raise a ValueError from
-        # ctranslate2 at load time rather than silently falling back. Try
-        # a small preference cascade instead of assuming the fastest
-        # option always works; explicit user-set values are tried as-is,
-        # with no cascade, so a deliberate choice is never silently
-        # overridden.
-        if self.config.compute_type == "auto":
-            candidates = (
-                ["float16", "int8_float16", "int8"] if device == "cuda"
-                else ["int8"]
-            )
-        else:
-            candidates = [self.config.compute_type]
-
-        last_error = None
-        for compute_type in candidates:
-            print("Trying compute type:", compute_type)
-            try:
-                model = WhisperModel(
-                    model_path,
-                    device=device,
-                    compute_type=compute_type,
-                    cpu_threads=self.config.cpu_threads,
-                    num_workers=self.config.num_workers,
-                )
-                # Force one real forward pass now rather than lazily on
-                # the first real utterance — a missing CUDA runtime
-                # library raises RuntimeError only once encode() actually
-                # runs, not at construction, so construction succeeding
-                # is not proof the device is usable. vad_filter=False so
-                # this silent dummy clip can't get skipped before
-                # reaching encode().
-                dummy = np.zeros(1600, dtype=np.float32)
-                segments, _ = model.transcribe(
-                    dummy, language=self.config.language, vad_filter=False,
-                )
-                list(segments)
-                print("Compute type in use:", compute_type)
-                return model
-            except (ValueError, RuntimeError) as e:
-                last_error = e
-                continue
-
-        raise last_error
-
-    def _init_cloud_backend(self):
-        try:
-            from groq import Groq
-        except ImportError as e:
-            raise ImportError(
-                "backend='cloud' (or 'auto' with GROQ_API_KEY set) requires "
-                "the groq package: pip install groq"
-            ) from e
-
-        api_key = self.config.groq_api_key or os.environ.get("GROQ_API_KEY")
-        if not api_key:
-            raise RuntimeError(
-                "backend='cloud' was requested but no GROQ_API_KEY is set. "
-                "Set the GROQ_API_KEY environment variable, or pass "
-                "Config(backend='local') to run locally instead."
-            )
-
-        self._groq_client = Groq(api_key=api_key)
-
-        reason = (
-            "backend='cloud' was set explicitly" if self.config.backend == "cloud"
-            else "GROQ_API_KEY is set - cloud is the primary backend"
-        )
-        print(
-            f"\n[Cloud backend] {reason} - using Groq's hosted "
-            f"'{self.config.groq_model}' for transcription.\n"
-            "Each utterance's audio will be sent to Groq's API.\n"
-        )
-
-        self._warm_up_cloud_connection()
-
-    def _warm_up_cloud_connection(self):
-        """Fires one throwaway request at startup so the TLS/HTTP
-        connection to Groq is already established before the first real
-        utterance needs it. Measured directly on this machine: the first
-        request on a fresh client pays a real, one-time connection-setup
-        cost (585-1337ms observed) that every later request on the same
-        client doesn't (settles to ~440-500ms) — without this, that whole
-        extra cost lands on whatever utterance happens to be first (or
-        first after a long enough gap that the connection dropped), which
-        is exactly the "it waits for something" pattern reported live.
-        Best-effort: a failure here (no internet yet, key not valid) just
-        means the first real utterance pays the same cost it always would
-        have — _decode_cloud's own error handling and _fallback_to_local
-        are unaffected either way, so this never blocks startup."""
-        try:
-            dummy = np.zeros(1600, dtype=np.float32)
-            self._decode_cloud(dummy)
-        except Exception as e:
-            log.debug("Cloud connection warm-up skipped: %s", e)
+    def _warm_up_local_fallback(self):
+        """Loads the local Whisper backend in a background thread right
+        after a cloud-primary session starts, instead of waiting for
+        _fallback_to_local to load it on demand for the first time.
+        Backend construction (reading weights off disk, plus the
+        validation forward pass in LocalWhisperBackend.load()) is a
+        multi-second cost on this kind of hardware — with no prewarm,
+        that whole cost previously landed inline on whatever utterance
+        happened to trigger the first cloud failure, on top of the
+        failed request's own latency. That's the multi-second latency
+        spike reported live during an otherwise-fast cloud session.
+        Best-effort and silent on failure (e.g. no local model files
+        present) — _ensure_backend_ready still loads synchronously if
+        this hasn't finished (or didn't succeed) by the time a real
+        fallback is needed, so nothing here is required for correctness,
+        only for speed."""
+        threading.Thread(
+            target=lambda: self._ensure_backend_ready("local"),
+            name="bible-ai-local-warmup", daemon=True,
+        ).start()
 
     def _rms(self, audio: np.ndarray) -> float:
         if audio.size == 0:
@@ -646,12 +594,15 @@ class BibleAITranscriber:
         return all(w.isdigit() or w in _NUMBER_WORDS for w in words)
 
     def _is_bad_output(self, text: str) -> bool:
-        """True only for genuinely empty output. Every other heuristic
-        below (too short, known filler phrase, repetition loop) used to
-        drop the utterance outright — now it only logs, since each one
-        was confirmed to also catch real, legitimately short or unusually
-        -phrased speech (a spoken verse reference among them) with no
-        trace left anywhere once dropped."""
+        """Drops genuinely empty output, known non-speech filler phrases,
+        and decode-loop repetition. A bare number is exempted from the
+        min_words floor (see _is_bare_number) since it's meaningful in
+        this domain regardless of word count — e.g. a spoken verse number
+        on its own after a pause. (A prior iteration made every check
+        here log-only and never actually drop anything; that let junk
+        output — including the repetition-loop and known-filler cases,
+        which essentially never match real sermon speech — ride straight
+        into the Bible-matching pipeline. Reverted.)"""
         if not text:
             return True
 
@@ -659,11 +610,12 @@ class BibleAITranscriber:
             self._word_count(text) < self.config.min_words
             and not self._is_bare_number(text)
         ):
-            log.warning(
-                "%d word(s), below min_words=%d floor (and not a bare "
-                "number) — keeping anyway: %r",
+            log.info(
+                "Dropped — %d word(s), below min_words=%d floor (and not "
+                "a bare number): %r",
                 self._word_count(text), self.config.min_words, text[:80],
             )
+            return True
 
         bad_outputs = {
             "thank you for watching",
@@ -678,10 +630,12 @@ class BibleAITranscriber:
 
         cleaned = text.lower().strip(" .,!?:;")
         if cleaned in bad_outputs:
-            log.warning("Matches known filler output — keeping anyway: %r", text[:80])
+            log.info("Dropped — matches known filler output: %r", text[:80])
+            return True
 
         if self._has_repetition_loop(text):
-            log.warning("Repetition loop — keeping anyway: %r", text[:80])
+            log.info("Dropped — repetition loop: %r", text[:80])
+            return True
 
         return False
 
@@ -810,7 +764,10 @@ class BibleAITranscriber:
         if duration_s < self.config.min_utterance_seconds:
             return
 
-        self._executor.submit(self._transcribe_utterance, audio, started_at)
+        with self._executor_lock:
+            self._executor.submit(
+                self._transcribe_utterance, audio, started_at, self._session_id
+            )
 
     def _finalize_soft_cut(self):
         """Forced cut at max_utterance_seconds for one long, uninterrupted
@@ -850,14 +807,27 @@ class BibleAITranscriber:
 
     def _passes_segment_gates(self, raw: str, avg_logprob, no_speech_prob,
                                compression_ratio) -> bool:
-        """Anti-hallucination signals, applied identically regardless of
-        which backend produced the segment (see module docstring). Logs
-        every low-confidence/repetitive/echoed segment it sees, but no
-        longer drops any of them — real, quiet, or unusually-phrased
-        speech (a spoken verse reference among them) was being silently
-        discarded with zero trace, which is worse than letting an
-        occasional genuine hallucination reach the transcript. See
-        _is_bad_output for the equivalent utterance-level change."""
+        """Anti-hallucination gates, applied identically regardless of
+        which backend produced the segment (see module docstring).
+
+        Only compression_ratio and prompt-echo actually drop a segment —
+        avg_logprob/no_speech_prob are logged but kept. Whisper splits
+        one utterance into multiple internal segments; dropping a
+        mid-utterance segment on a blunt confidence signal doesn't lose
+        the whole utterance, it carves a silent gap out of the middle of
+        it (confirmed live: real words missing mid-sentence from the
+        transcript, not whole utterances vanishing). These two
+        thresholds were already eased once before for exactly this
+        reason (-1.0/0.70 -> -1.2/0.80) and still caught genuine quiet/
+        fast/emphasis-toned speech at the eased values — and _has_speech
+        (a real Silero VAD pass) already screens out true silence/
+        ambient noise before decode even starts, which was the main
+        hallucination risk these two were guarding against in the first
+        place. compression_ratio and prompt-echo stay hard drops: unlike
+        the two above, they're specific, low-false-positive signals tied
+        to the actual hallucination patterns observed on real sermon
+        audio ("hey, hey, hey...", initial_prompt regurgitated
+        verbatim) — real speech essentially never trips them."""
         if avg_logprob is not None and avg_logprob < -1.2:
             log.warning(
                 "Low decode confidence — avg_logprob %.2f below -1.20, "
@@ -884,19 +854,21 @@ class BibleAITranscriber:
             and compression_ratio > self.config.compression_ratio_threshold
         ):
             log.warning(
-                "High compression ratio %.2f exceeds %.2f (possible "
-                "repetition loop), keeping anyway: %r",
+                "Dropped segment — compression ratio %.2f exceeds %.2f "
+                "(likely a repetition loop): %r",
                 compression_ratio,
                 self.config.compression_ratio_threshold,
                 raw[:80],
             )
+            return False
 
         if self._is_prompt_echo(raw):
             log.warning(
-                "Echoes the configured initial_prompt — possibly not "
-                "real speech, keeping anyway: %r",
+                "Dropped segment — echoes the configured initial_prompt "
+                "instead of real speech: %r",
                 raw[:80],
             )
+            return False
 
         return True
 
@@ -921,77 +893,52 @@ class BibleAITranscriber:
         normalized = text.strip().lower().rstrip(".!?")
         return normalized == prompt or normalized in prompt
 
-    def _decode_local(self, audio: np.ndarray) -> List[str]:
-        segments, _ = self.model.transcribe(
-            audio,
-            language=self.config.language,
-            task="transcribe",
-            beam_size=self.config.beam_size,
-            best_of=self.config.best_of,
-            temperature=list(self.config.temperature),
-            vad_filter=True,
-            vad_parameters={
-                # Raised from 0.35 — a stricter speech/non-speech cut
-                # means less ambient noise and silence ever reaches the
-                # decoder in the first place, which is exactly the
-                # audio that's most prone to being hallucinated into a
-                # fluent-sounding but fabricated sentence.
-                "threshold": 0.5,
-                "min_silence_duration_ms": 250,
-                "speech_pad_ms": 200,
-            },
-            condition_on_previous_text=False,
-            initial_prompt=self.config.initial_prompt,
-            no_speech_threshold=0.60,
-            log_prob_threshold=-1.2,
-            compression_ratio_threshold=self.config.compression_ratio_threshold,
-            repetition_penalty=self.config.repetition_penalty,
-            no_repeat_ngram_size=self.config.no_repeat_ngram_size,
-            without_timestamps=True,
-            word_timestamps=False,
-        )
-
+    def _apply_gates(self, segments: Optional[List[RawSegment]]) -> List[str]:
+        """Applies the anti-hallucination gates uniformly to whatever a
+        backend returned, regardless of which backend produced it — a
+        backend with no per-segment confidence data (e.g. an explicit-
+        only Twi backend) just passes None for those fields in its
+        RawSegments, which _passes_segment_gates already treats as
+        "skip that particular check" (see its own docstring)."""
         parts = []
-
-        for seg in segments:
-            raw = getattr(seg, "text", "").strip()
-
-            if not raw:
-                continue
-
-            if not self._passes_segment_gates(
-                raw,
-                getattr(seg, "avg_logprob", 0.0),
-                getattr(seg, "no_speech_prob", 0.0),
-                getattr(seg, "compression_ratio", 0.0),
+        for seg in segments or []:
+            if not seg.bypass_gates and not self._passes_segment_gates(
+                seg.text, seg.avg_logprob, seg.no_speech_prob,
+                seg.compression_ratio,
             ):
                 continue
-
-            parts.append(raw)
-
+            parts.append(seg.text)
         return parts
 
-    def _encode_wav(self, audio: np.ndarray) -> bytes:
-        buf = io.BytesIO()
-        sf.write(buf, audio, self.config.sample_rate, format="WAV", subtype="PCM_16")
-        buf.seek(0)
-        return buf.read()
+    def decode(self, audio: np.ndarray) -> List[str]:
+        """Backend-select + decode + gate-filter for one utterance clip.
+        Public — also used directly by app/evaluation/pipeline.py so eval
+        numbers reflect exactly what live transcription does, without
+        that module needing its own copy of this backend/fallback
+        branching (see _resolve_backend's registry-driven validation for
+        why adding a backend never requires touching this method)."""
+        if self.backend == "cloud":
+            segments = self._backend_instances["cloud"].transcribe(audio)
+            if segments is None:
+                self._fallback_to_local("cloud request failed")
+                segments = (
+                    self._backend_instances["local"].transcribe(audio)
+                    if self.backend == "local" else []
+                )
+        elif self._should_probe_cloud():
+            # Background recovery probe: try cloud for this one
+            # utterance without disrupting the local fallback if it
+            # still fails.
+            segments = self._backend_instances["cloud"].transcribe(audio)
+            if segments is not None:
+                self._recover_to_cloud()
+            else:
+                self._schedule_next_cloud_retry()
+                segments = self._backend_instances["local"].transcribe(audio)
+        else:
+            segments = self._backend_instances[self.backend].transcribe(audio)
 
-    def _ensure_local_ready(self) -> bool:
-        """Lazily loads the local model the first time it's actually
-        needed as a fallback (a cloud-primary session never pays this
-        startup cost unless/until cloud actually fails). Returns whether a
-        usable local model is now loaded. Safe to call repeatedly —
-        no-ops once self.model already exists."""
-        if getattr(self, "model", None) is not None:
-            return True
-
-        try:
-            self._init_local_backend()
-            return True
-        except Exception as e:
-            log.error("Local fallback failed to initialize: %s", e)
-            return False
+        return self._apply_gates(segments)
 
     def _fallback_to_local(self, reason: str):
         """Called when a cloud request fails at runtime (network drop,
@@ -1007,7 +954,7 @@ class BibleAITranscriber:
         if self.backend != "cloud":
             return
 
-        if not self._ensure_local_ready():
+        if not self._ensure_backend_ready("local"):
             return
 
         print(f"\n[Cloud backend failed] {reason} — using local "
@@ -1028,7 +975,7 @@ class BibleAITranscriber:
         return (
             self._preferred_backend == "cloud"
             and self.backend == "local"
-            and self._groq_client is not None
+            and "cloud" in self._backend_instances
             and time.time() >= self._next_cloud_retry_at
         )
 
@@ -1043,65 +990,9 @@ class BibleAITranscriber:
             self._resize_executor_for_backend()
         self._next_cloud_retry_at = 0.0
 
-    def _decode_cloud(self, audio: np.ndarray) -> Optional[List[str]]:
-        """Returns None on request failure (network drop, outage, rate
-        limit) so callers can decide what to do — this function has no
-        side effects on self.backend, which lets it double as both the
-        primary cloud path and a background recovery probe."""
-        wav_bytes = self._encode_wav(audio)
-
-        kwargs = dict(
-            file=("utterance.wav", wav_bytes),
-            model=self.config.groq_model,
-            language=self.config.language,
-            temperature=0.0,
-            response_format="verbose_json",
-        )
-        # Omitted entirely rather than passed as prompt=None — the SDK
-        # forwards kwargs into a multipart form, which isn't guaranteed to
-        # treat a literal None the same as the field being absent.
-        if self.config.initial_prompt:
-            kwargs["prompt"] = self.config.initial_prompt
-
-        try:
-            response = self._groq_client.audio.transcriptions.create(**kwargs)
-        except Exception as e:
-            log.warning("Groq transcription request failed: %s", e)
-            return None
-
-        segments = getattr(response, "segments", None) or []
-        parts = []
-
-        for seg in segments:
-            get = seg.get if isinstance(seg, dict) else (
-                lambda k, d=None: getattr(seg, k, d)
-            )
-            raw = (get("text", "") or "").strip()
-
-            if not raw:
-                continue
-
-            if not self._passes_segment_gates(
-                raw,
-                get("avg_logprob", 0.0),
-                get("no_speech_prob", 0.0),
-                get("compression_ratio", 0.0),
-            ):
-                continue
-
-            parts.append(raw)
-
-        # verbose_json should always carry segments, but fall back to the
-        # top-level text rather than silently dropping the utterance if a
-        # future API response ever omits them.
-        if not parts:
-            top_level = getattr(response, "text", "") or ""
-            if top_level.strip():
-                parts = [top_level.strip()]
-
-        return parts
-
-    def _transcribe_utterance(self, audio: np.ndarray, started_at: float):
+    def _transcribe_utterance(
+        self, audio: np.ndarray, started_at: float, session_id: int
+    ):
         try:
             if self._rms(audio) < self.config.silence_threshold:
                 return
@@ -1115,27 +1006,23 @@ class BibleAITranscriber:
                 )
                 return
 
-            if self.backend == "cloud":
-                parts = self._decode_cloud(audio)
-                if parts is None:
-                    self._fallback_to_local("cloud request failed")
-                    parts = self._decode_local(audio) if self.backend == "local" else []
-            elif self._should_probe_cloud():
-                # Background recovery probe: try cloud for this one
-                # utterance without disrupting the local fallback if it
-                # still fails.
-                parts = self._decode_cloud(audio)
-                if parts is not None:
-                    self._recover_to_cloud()
-                else:
-                    self._schedule_next_cloud_retry()
-                    parts = self._decode_local(audio)
-            else:
-                parts = self._decode_local(audio)
-
+            parts = self.decode(audio)
             text = self._clean_text(" ".join(parts))
 
             if self._is_bad_output(text):
+                return
+
+            # A decode running on the executor can still be in flight
+            # when stop() — or a quick stop()-then-start() toggle, well
+            # within a Whisper/Groq round-trip time — happens. session_id
+            # was captured at submit time (see _finalize) and only still
+            # matches self._session_id if neither start() nor stop() has
+            # run since; both bump it (see __init__'s comment). Checked
+            # before touching ANY shared state below, not just before
+            # the callback, so a stale decode can't contaminate
+            # last_text/last_emit_time or the console/log output with a
+            # different (stopped or already-superseded) session's result.
+            if session_id != self._session_id:
                 return
 
             self.last_text = text
@@ -1145,12 +1032,6 @@ class BibleAITranscriber:
             log.info("Utterance ready in %.0fms: %s", elapsed_ms, text)
             print(f">> ({elapsed_ms:.0f}ms) {text}")
 
-            # A decode running on the executor can still be in flight when
-            # stop() is called — don't let it push a stale result into the
-            # engine after the operator has already stopped listening.
-            if self.stop_event.is_set():
-                return
-
             if self.callback_fn:
                 self.callback_fn(text)
 
@@ -1159,6 +1040,7 @@ class BibleAITranscriber:
 
     def start(self):
         self.stop_event.clear()
+        self._session_id += 1
         self._state = "SILENCE"
         self._utterance_chunks = []
         self._utterance_samples = 0
@@ -1194,6 +1076,7 @@ class BibleAITranscriber:
 
     def stop(self):
         self.stop_event.set()
+        self._session_id += 1
 
         if self.stream:
             self.stream.stop()
@@ -1201,15 +1084,23 @@ class BibleAITranscriber:
             self.stream = None
 
         # Drop any not-yet-started decodes and don't block shutdown waiting
-        # on in-flight ones — the stop_event check in _transcribe_utterance
-        # keeps a straggler from firing a stale callback. Replaced (not just
-        # shut down) so a subsequent start() still has a usable pool.
-        self._executor.shutdown(wait=False, cancel_futures=True)
-        self._dispatch_workers = self._dispatch_worker_count()
-        self._executor = ThreadPoolExecutor(
-            max_workers=self._dispatch_workers,
-            thread_name_prefix="bible-ai-transcribe",
-        )
+        # on in-flight ones — the session_id check in _transcribe_utterance
+        # keeps a straggler from firing a stale callback (or, on a quick
+        # stop()-then-start(), into the NEW session — see __init__'s
+        # comment on _session_id, which is why stop_event alone isn't
+        # enough). Replaced (not just shut down) so a subsequent start()
+        # still has a usable pool. Locked against _finalize's submit()
+        # and _resize_executor_for_backend's own swap (both read/replace
+        # self._executor too) — unsynchronized, a submit() landing
+        # between this shutdown() and the reassignment below would raise
+        # inside the sounddevice callback thread.
+        with self._executor_lock:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+            self._dispatch_workers = self._dispatch_worker_count()
+            self._executor = ThreadPoolExecutor(
+                max_workers=self._dispatch_workers,
+                thread_name_prefix="bible-ai-transcribe",
+            )
 
         print("\nTranscriber stopped.")
 
@@ -1237,9 +1128,10 @@ def main():
     parser.add_argument("--model", type=str, default="base.en")
     parser.add_argument("--beam", type=int, default=3)
     parser.add_argument("--endpoint-silence-ms", type=int, default=350)
-    parser.add_argument("--max-utterance-seconds", type=float, default=10.0)
+    parser.add_argument("--max-utterance-seconds", type=float, default=6.0)
     parser.add_argument(
-        "--backend", type=str, default="auto", choices=["auto", "local", "cloud"],
+        "--backend", type=str, default="auto",
+        choices=["auto"] + sorted(BACKEND_REGISTRY),
         help="'auto' (default) uses Groq's cloud Whisper API as the primary "
              "backend if GROQ_API_KEY is set, else falls back to local "
              "(GPU if usable, else CPU)."

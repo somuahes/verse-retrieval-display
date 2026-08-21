@@ -506,7 +506,16 @@ class HybridEngine:
 
         self._last_match_time = 0.0
         self._last_key: Optional[str] = None
-        self._lock = threading.Lock()
+        # Reentrant: process() (background ASR thread) holds this while
+        # running _run_fast, which itself calls _navigate/_switch_version
+        # internally — a plain Lock would deadlock on that same-thread
+        # re-entry. Needs to be reentrant rather than just "some lock" so
+        # the operator UI (main thread) can call _navigate/_switch_version/
+        # manual_display/confirm_live directly — as it does, for the Nav
+        # buttons, Switch Version, detection ▶, and Live confirm — without
+        # racing a concurrent process() call on the ASR thread over the
+        # same session/semantic-index state.
+        self._lock = threading.RLock()
 
         # De-dupes nav commands detected from voice/typed text — see
         # VOICE_NAV_COOLDOWN above.
@@ -707,6 +716,16 @@ class HybridEngine:
         )
 
         if not force and key == self._last_key:
+            # Still a real, current re-detection of the verse actively on
+            # screen — e.g. a direct match followed by a later utterance
+            # semantically re-confirming the same verse. Refreshing the
+            # timeout clock here (even though the display/callback side
+            # effects below are correctly skipped) keeps verse_tracking
+            # alive while the preacher keeps referencing it; previously
+            # this returned before ever touching _last_match_time, so the
+            # tracking window kept counting from the ORIGINAL match and
+            # could silently expire mid-conversation about the same verse.
+            self._last_match_time = time.time()
             log.debug("Skipping duplicate verse: %s", key)
             return
 
@@ -737,127 +756,200 @@ class HybridEngine:
         live on the projector — see main_ui.py's _set_live(). This is
         the ONLY place self._live_position is updated; see its comment
         in __init__ for why it's kept separate from session.current_book
-        /chapter/verse."""
-        if verse:
-            self._live_position = (
-                str(verse.get("book", "")),
-                int(verse.get("chapter", 0)),
-                int(verse.get("verse", 0)),
-            )
-        else:
-            self._live_position = None
+        /chapter/verse. Called from the UI (main) thread — takes the same
+        lock process() (background ASR thread) holds, since both read/
+        write this and related session state (see __init__'s _lock
+        comment)."""
+        with self._lock:
+            if verse:
+                self._live_position = (
+                    str(verse.get("book", "")),
+                    int(verse.get("chapter", 0)),
+                    int(verse.get("verse", 0)),
+                )
+            else:
+                self._live_position = None
+
+    def sync_position(self, book: str, chapter: int, verse: int):
+        """Public, locked wrapper for updating session position from the
+        UI (main) thread — e.g. main_ui.py's _promote_search_result()
+        keeping the engine's position in sync with a search result the
+        operator sent to Preview. session.update_position() itself writes
+        book/chapter/verse as three separate, non-atomic assignments;
+        going through this (instead of touching self.session directly,
+        as this call site used to) keeps it from interleaving with
+        process() on the ASR thread and leaving current_book/chapter/
+        verse momentarily mismatched."""
+        with self._lock:
+            self.session.update_position(str(book), int(chapter), int(verse))
+
+    def position_snapshot(self):
+        """Atomic (active_version, book, chapter, verse) snapshot for the
+        UI thread to read — book/chapter/verse are None if no position is
+        tracked yet. SessionState.update_position()/clear_position()
+        write current_book/chapter/verse as separate, non-atomic
+        assignments (see version_detector.py), so reading them as three
+        separate attribute accesses (as main_ui.py used to) risks a torn
+        read if process() lands a position update on the ASR thread
+        between them — e.g. the new book paired with the still-old
+        chapter, silently looking up the wrong verse. Callers that need
+        the position should use this instead of touching self.session
+        directly."""
+        with self._lock:
+            version = str(self.session.active_version)
+            if self._has_position():
+                book = str(self.session.current_book)
+                chapter = int(self.session.current_chapter)
+                verse = int(self.session.current_verse)
+            else:
+                book = chapter = verse = None
+            return version, book, chapter, verse
+
+    def search_top_k(self, query: str, k: int = 8) -> List[dict]:
+        """Public, locked wrapper around self.semantic.search_top_k() —
+        for direct UI use (e.g. main_ui.py's search box), which used to
+        call self._engine.semantic.search_top_k() straight through,
+        racing a concurrent process() call on the ASR thread that can
+        reassign self.semantic.index/verse_store via _switch_version
+        (e.g. an operator typing a search just as a spoken version
+        switch lands) — this pairs the index and verse_store it reads
+        with whichever version was actually active when the call
+        started, instead of possibly a torn mix of both."""
+        with self._lock:
+            return self.semantic.search_top_k(query, k=k)
 
     # ========================================================
     # NAVIGATION
     # ========================================================
 
     def _navigate(self, cmd: str):
-        cmd = str(cmd).upper().strip()
+        # Called from both process() (background ASR thread, already
+        # holding self._lock) and directly from the UI's Nav buttons
+        # (main thread) — reentrant lock, see __init__'s comment.
+        with self._lock:
+            cmd = str(cmd).upper().strip()
 
-        # Prefer live position; fall back to session position (see
-        # __init__'s _live_position comment) so navigation still works
-        # before the first Go Live push, same as _switch_version.
-        if self._live_position:
-            book, chapter, verse = self._live_position
-        elif self._has_position():
-            book = str(self.session.current_book)
-            chapter = int(self.session.current_chapter)
-            verse = int(self.session.current_verse)
-        else:
-            book = None
+            # Prefer live position; fall back to session position (see
+            # __init__'s _live_position comment) so navigation still
+            # works before the first Go Live push, same as
+            # _switch_version.
+            if self._live_position:
+                book, chapter, verse = self._live_position
+            elif self._has_position():
+                book = str(self.session.current_book)
+                chapter = int(self.session.current_chapter)
+                verse = int(self.session.current_verse)
+            else:
+                book = None
 
-        if cmd != "STOP" and book is None:
-            log.info(
-                "Navigation '%s' ignored — no verse currently tracked "
-                "(live or preview)",
-                cmd,
-            )
-            return
+            if cmd != "STOP" and book is None:
+                log.info(
+                    "Navigation '%s' ignored — no verse currently tracked "
+                    "(live or preview)",
+                    cmd,
+                )
+                return
 
-        version = str(self.session.active_version)
-        if book is None:
-            book, chapter, verse = "", 0, 0
+            version = str(self.session.active_version)
+            if book is None:
+                book, chapter, verse = "", 0, 0
 
-        # _set_state("sequential") must run AFTER _display(), not before —
-        # _display() unconditionally sets "verse_tracking" on every call,
-        # which would otherwise immediately overwrite "sequential" in the
-        # same command, making it unreachable by SEMANTIC_CONFIDENCE_HI's
-        # state check and the status label.
-        if cmd == "NEXT":
-            r = db_get_next_verse(version, book, chapter, verse)
-            if r:
-                self._tag_command(r, "navigation", NAV_LABELS.get(cmd, cmd))
-                self._display(r)
-                self._set_state("sequential")
+            # _set_state("sequential") must run AFTER _display(), not
+            # before — _display() unconditionally sets "verse_tracking"
+            # on every call, which would otherwise immediately overwrite
+            # "sequential" in the same command, making it unreachable by
+            # SEMANTIC_CONFIDENCE_HI's state check and the status label.
+            if cmd == "NEXT":
+                r = db_get_next_verse(version, book, chapter, verse)
+                if r:
+                    self._tag_command(r, "navigation", NAV_LABELS.get(cmd, cmd))
+                    self._display(r)
+                    self._set_state("sequential")
 
-        elif cmd == "PREV":
-            r = db_get_prev_verse(version, book, chapter, verse)
-            if r:
-                self._tag_command(r, "navigation", NAV_LABELS.get(cmd, cmd))
-                self._display(r)
-                self._set_state("sequential")
+            elif cmd == "PREV":
+                r = db_get_prev_verse(version, book, chapter, verse)
+                if r:
+                    self._tag_command(r, "navigation", NAV_LABELS.get(cmd, cmd))
+                    self._display(r)
+                    self._set_state("sequential")
 
-        elif cmd == "LAST":
-            r = db_get_last_verse(version, book, chapter)
-            if r:
-                self._tag_command(r, "navigation", NAV_LABELS.get(cmd, cmd))
-                self._display(r)
-                self._set_state("sequential")
+            elif cmd == "LAST":
+                r = db_get_last_verse(version, book, chapter)
+                if r:
+                    self._tag_command(r, "navigation", NAV_LABELS.get(cmd, cmd))
+                    self._display(r)
+                    self._set_state("sequential")
 
-        elif cmd == "REPEAT":
-            r = db_get_verse(version, book, chapter, verse)
-            if r:
-                self._tag_command(r, "navigation", NAV_LABELS.get(cmd, cmd))
-                self._display(r, force=True)
+            elif cmd == "REPEAT":
+                r = db_get_verse(version, book, chapter, verse)
+                if r:
+                    self._tag_command(r, "navigation", NAV_LABELS.get(cmd, cmd))
+                    self._display(r, force=True)
 
-        elif cmd == "STOP":
-            self._last_key = None
-            self._clear_position()
-            self._set_state("context_matching")
+            elif cmd == "STOP":
+                self._last_key = None
+                self._clear_position()
+                self._set_state("context_matching")
 
-            if self._verse_cb:
-                self._verse_cb(None)
+                if self._verse_cb:
+                    self._verse_cb(None)
 
     # ========================================================
     # VERSION SWITCH
     # ========================================================
 
-    def _switch_version(self, new_ver: str):
-        new_ver = str(new_ver).upper().strip()
-        current = str(self.session.active_version).upper().strip()
+    def _switch_version(self, new_ver: str) -> bool:
+        """Applies a version switch (session + semantic index) if new_ver
+        differs from the current one and is installed. Returns whether it
+        actually switched. Deliberately does NOT redisplay the current
+        position — see _redisplay_current_position, called separately by
+        _run_fast only when the same utterance carried no reference/
+        verse-jump of its own, so a version cue spoken alongside a
+        reference ("Hebrews 7 verse 19 in the Message") doesn't flash the
+        old verse under the new version before the correct one replaces
+        it. Called from both process() (background ASR thread, already
+        holding self._lock) and directly from the UI's Switch Version
+        control (main thread) — reentrant lock, see __init__'s comment."""
+        with self._lock:
+            new_ver = str(new_ver).upper().strip()
+            current = str(self.session.active_version).upper().strip()
 
-        if new_ver == current:
-            return
+            if new_ver == current:
+                return False
 
-        available = [v.upper() for v in db_list_versions()]
+            available = [v.upper() for v in db_list_versions()]
 
-        if new_ver not in available:
-            log.warning(
-                "Version '%s' is not installed. Available: %s",
-                new_ver,
-                available,
-            )
-
-            if self._status_cb:
-                self._status_cb(
-                    "version_error",
-                    f"{new_ver} not installed — staying on {current}",
+            if new_ver not in available:
+                log.warning(
+                    "Version '%s' is not installed. Available: %s",
+                    new_ver,
+                    available,
                 )
 
-            return
+                if self._status_cb:
+                    self._status_cb(
+                        "version_error",
+                        f"{new_ver} not installed — staying on {current}",
+                    )
 
-        log.info("Version switch: %s → %s", current, new_ver)
+                return False
 
-        self.session.update_version(new_ver)
-        self.semantic.switch_version(new_ver)
+            log.info("Version switch: %s → %s", current, new_ver)
 
-        if self._status_cb:
-            self._status_cb("version_switch", f"Switched to {new_ver}")
+            self.session.update_version(new_ver)
+            self.semantic.switch_version(new_ver)
 
-        # Prefer live position; fall back to session position (see
-        # __init__'s _live_position comment) — otherwise Preview would
-        # keep showing the old version after a switch, before anything's
-        # gone live yet.
+            if self._status_cb:
+                self._status_cb("version_switch", f"Switched to {new_ver}")
+
+            return True
+
+    def _redisplay_current_position(self, new_ver: str):
+        """Re-shows whatever position was already current, under the
+        version just switched to — otherwise Preview would keep showing
+        the old version after a switch, before anything's gone live yet.
+        Prefers live position; falls back to session position (see
+        __init__'s _live_position comment)."""
         if self._live_position:
             book, chapter, verse_no = self._live_position
         elif self._has_position():
@@ -926,10 +1018,18 @@ class HybridEngine:
         # 1. Version change
         # ====================================================
         new_ver = detect_version(text)
-
-        if new_ver:
-            self._switch_version(new_ver)
-            return True
+        version_cue = bool(new_ver)
+        version_switched = self._switch_version(new_ver) if new_ver else False
+        # Falls through instead of returning — a version cue is often
+        # spoken in the same breath as a reference ("Hebrews 7 the verse
+        # number 19, let's do it in MSG"), and returning here would
+        # apply the switch but silently discard that reference. Steps
+        # 2-4 below get a chance to also handle the rest of this same
+        # text (against the version just switched to). _switch_version
+        # itself does NOT redisplay the current position — that only
+        # happens at the bottom of this method, and only if nothing else
+        # fired, so a reference found by steps 2-4 is what gets shown,
+        # not a flash of the old verse first.
 
         # ====================================================
         # 2. Navigation
@@ -1152,7 +1252,14 @@ class HybridEngine:
                     self._set_state("sequential")
                     return True
 
-        return False
+        # Nothing else in this utterance produced its own display —
+        # if a version switch happened, this was a pure version-switch
+        # utterance, so show the current position under the new version
+        # now (deferred from _switch_version — see its docstring).
+        if version_switched:
+            self._redisplay_current_position(str(self.session.active_version))
+
+        return version_cue
 
     # ========================================================
     # SEMANTIC — shadow verification + resolution
@@ -1218,28 +1325,20 @@ class HybridEngine:
                 text[:100],
             )
 
-            # A genuine second match for different content than the
-            # reference itself, not just a disagreement — the common case
-            # is a preacher citing a verse by number and, in the same
-            # breath, paraphrasing a different one. Direct-reference wins
-            # the utterance and returns immediately (_run_fast), so that
-            # second citation would otherwise never reach semantic search.
-            # Surfaced as a detection only, via the normal verse callback
-            # (same Auto/Manual gating as any other semantic detection) —
-            # never overrides the direct match already on screen.
-            row = db_get_verse(
-                str(self.session.active_version),
-                str(sem.get("book", "")),
-                int(sem.get("chapter", 0)),
-                int(sem.get("verse", 0)),
-            )
-            notify = row or sem
-            notify["match_type"] = "semantic"
-            notify["confidence"] = final_score
-            notify["matched_at"] = time.time()
-            notify["source_text"] = text
-            notify.setdefault("version", str(self.session.active_version))
-            self._notify_secondary_detection(notify)
+            # Log-only from here — the log.warning above already captures
+            # book/chapter/verse/score/source text for review. This used
+            # to also push the disagreement to the AI Detections panel via
+            # _notify_secondary_detection, on the theory that it might be
+            # a genuine second citation riding in the same utterance (a
+            # preacher citing a verse by number, then paraphrasing another
+            # in the same breath). In practice this surfaced a confusing
+            # second card for sentences the direct match already resolved
+            # correctly, often on nothing more than a stray shared word
+            # (e.g. a split-utterance fragment's trailing "spirit" from
+            # the PREVIOUS sentence coincidentally scoring against an
+            # unrelated verse) — operator-misleading noise, not signal.
+            # The log trail below is kept for future tuning; only the
+            # UI-facing side effect was removed.
 
         self._shadow_executor.submit(_run)
 
@@ -1389,17 +1488,22 @@ class HybridEngine:
     # ========================================================
 
     def manual_display(self, book: str, chapter: int, verse: int):
-        r = db_get_verse(
-            str(self.session.active_version),
-            str(book),
-            int(chapter),
-            int(verse),
-        )
+        # Called directly from the UI (main thread) — e.g. detection ▶ —
+        # while process() may be running concurrently on the ASR thread;
+        # takes the same lock (reentrant, see __init__'s comment) so the
+        # two never race over session/active_version state.
+        with self._lock:
+            r = db_get_verse(
+                str(self.session.active_version),
+                str(book),
+                int(chapter),
+                int(verse),
+            )
 
-        if r:
-            self._tag_command(r, "manual", f"{book} {chapter}:{verse}")
-            self._last_key = None
-            self._display(r, force=True)
+            if r:
+                self._tag_command(r, "manual", f"{book} {chapter}:{verse}")
+                self._last_key = None
+                self._display(r, force=True)
 
     def manual_search(self, query: str) -> List[Dict]:
         return db_search_text(str(self.session.active_version), query)

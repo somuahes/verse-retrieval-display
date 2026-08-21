@@ -62,7 +62,11 @@ def get_logger(name: str) -> logging.Logger:
     name : typically __name__ from the calling module
     """
     _configure()
-    # Prefix non-namespaced names so all project loggers are grouped
-    if not name.startswith("bible_ai") and not name.startswith("app"):
+    # Prefix so every project logger is grouped under (and inherits the
+    # handlers of) the "bible_ai" logger _configure() sets up — Python's
+    # logging hierarchy is purely dot-based, so e.g. "app.retrieval"
+    # is NOT a child of "bible_ai" and would silently miss its handlers
+    # (falling through to the unconfigured root logger) without this.
+    if not name.startswith("bible_ai"):
         name = f"bible_ai.{name}"
     return logging.getLogger(name)

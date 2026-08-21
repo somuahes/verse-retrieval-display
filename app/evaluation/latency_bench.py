@@ -40,9 +40,18 @@ def available_whisper_models():
 
 
 def _bench_asr(rows, testset_path, model_size):
-    from faster_whisper import WhisperModel
-    model_path = os.path.join(WHISPER_MODELS_DIR, model_size)
-    model = WhisperModel(model_path, device="cpu", compute_type="int8")
+    # transcribe_audio() (app/evaluation/pipeline.py) routes through a
+    # real BibleAITranscriber — its own decode()/gate/cleanup pipeline,
+    # not a bare WhisperModel.transcribe() call — so eval numbers reflect
+    # what live transcription actually does (see that function's
+    # docstring). A raw WhisperModel has none of the attributes it needs
+    # (.config, .decode(), ._normalize_audio(), ._clean_text(),
+    # ._is_bad_output()) and would raise AttributeError on the first
+    # clip.
+    from app.asr.transcriber import BibleAITranscriber, Config
+    transcriber = BibleAITranscriber(
+        Config(backend="local", model_size=model_size)
+    )
 
     per_clip = []
     for row in rows:
@@ -52,7 +61,7 @@ def _bench_asr(rows, testset_path, model_size):
         if not os.path.exists(audio_path):
             continue
         clip_seconds = os.path.getsize(audio_path) / (16000 * 2)  # rough estimate, 16kHz 16-bit mono
-        _text, elapsed_ms = transcribe_audio(model, audio_path)
+        _text, elapsed_ms = transcribe_audio(transcriber, audio_path)
         per_clip.append({"id": row["id"], "approx_clip_seconds": round(clip_seconds, 2), "asr_ms": round(elapsed_ms, 2)})
     return per_clip
 

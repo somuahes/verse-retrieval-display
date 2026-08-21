@@ -95,12 +95,14 @@ def detect(text: str, version: str, semantic_engine: SemanticEngine) -> Detectio
 
 def transcribe_audio(transcriber, audio_path: str) -> Tuple[str, float]:
     """Returns (text, elapsed_ms). `transcriber` is a real
-    BibleAITranscriber instance — routes through whatever backend it
-    actually resolved to (Groq cloud or local) plus its real
-    anti-hallucination gates and text cleanup, so eval numbers reflect
-    what the live app actually does. A bare WhisperModel.transcribe()
-    call here would silently test a different, simpler pipeline than
-    production (no prompt, no segment gates, no Groq path at all)."""
+    BibleAITranscriber instance — routes through transcriber.decode(),
+    the same public entry point live transcription uses, so it picks up
+    whatever backend actually resolved (Groq cloud, local, or any future
+    registered backend) plus its real anti-hallucination gates, with no
+    backend-specific branching duplicated here. A bare
+    WhisperModel.transcribe() call here would silently test a different,
+    simpler pipeline than production (no prompt, no segment gates, no
+    Groq path at all)."""
     import numpy as np
     import soundfile as sf
 
@@ -116,10 +118,7 @@ def transcribe_audio(transcriber, audio_path: str) -> Tuple[str, float]:
     audio = transcriber._normalize_audio(audio)
 
     t0 = time.perf_counter()
-    if transcriber.backend == "cloud":
-        parts = transcriber._decode_cloud(audio)
-    else:
-        parts = transcriber._decode_local(audio)
+    parts = transcriber.decode(audio)
     text = transcriber._clean_text(" ".join(parts))
     elapsed_ms = (time.perf_counter() - t0) * 1000
 

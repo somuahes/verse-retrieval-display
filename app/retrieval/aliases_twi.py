@@ -237,6 +237,10 @@ STRUCTURAL_WORDS: dict[str, str] = {
     "t": "chapter",
 }
 
+# See aliases_en.py's BARE_MENTION_BLOCKLIST — no current Twi
+# BOOK_ALIASES entry is also an ordinary word risky enough to need one.
+BARE_MENTION_BLOCKLIST: set[str] = set()
+
 # ============================================================
 # NAVIGATION COMMANDS — DRAFT, UNVERIFIED.
 #

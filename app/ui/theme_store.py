@@ -26,6 +26,31 @@ def _theme_path(name: str) -> str:
     return os.path.join(THEMES_DIR, f"{_slugify(name)}.json")
 
 
+def name_in_use(name: str, exclude_name: Optional[str] = None) -> bool:
+    """True if `name` would collide with an existing theme's FILE, by
+    slug -- not just by exact display-name string. Two distinct display
+    names that differ only in punctuation/case (e.g. "Gold!" and
+    "Gold?") both slugify to the same "gold.json" and would silently
+    clobber each other's saved file otherwise; a caller comparing new
+    names against list_themes()'s exact strings would miss that.
+    `exclude_name` lets a rename check against every OTHER theme's slug
+    without flagging the theme's own current one."""
+    os.makedirs(THEMES_DIR, exist_ok=True)
+    target_slug = _slugify(name)
+    exclude_slug = _slugify(exclude_name) if exclude_name else None
+
+    for fname in os.listdir(THEMES_DIR):
+        if not fname.endswith(".json"):
+            continue
+        slug = fname[:-5]
+        if slug == exclude_slug:
+            continue
+        if slug == target_slug:
+            return True
+
+    return False
+
+
 def ensure_starter_themes():
     os.makedirs(THEMES_DIR, exist_ok=True)
     if any(f.endswith(".json") for f in os.listdir(THEMES_DIR)):

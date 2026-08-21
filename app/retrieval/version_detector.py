@@ -94,7 +94,7 @@ _FILLER = r"(?:\s+verse\s+|\s+)"
 
 # Core pattern: captures start and end digit
 _CORE = (
-    rf"verses?\s+(\d{{1,3}})\s+{_CONNECTOR}{_FILLER}(\d{{1,3}})\b"
+    rf"\bverses?\s+(\d{{1,3}})\s+{_CONNECTOR}{_FILLER}(\d{{1,3}})\b"
 )
 
 # "from verse X [connector] [verse] Y"
@@ -208,7 +208,7 @@ def detect_all(text: str) -> Tuple[Optional[str], Optional[str]]:
 #  DETECT VERSE JUMP
 # ════════════════════════════════════════════════════════════
 _VERSE_JUMP_RE = re.compile(
-    r"(?:go\s+to\s+|turn\s+to\s+|read\s+)?verse\s+(?:number\s+)?(\d{1,3})\b",
+    r"(?:go\s+to\s+|turn\s+to\s+|read\s+)?\bverse\s+(?:number\s+)?(\d{1,3})\b",
     re.IGNORECASE,
 )
 

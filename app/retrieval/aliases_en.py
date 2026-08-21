@@ -355,6 +355,24 @@ STRUCTURAL_WORDS: dict[str, str] = {
 }
 
 # ============================================================
+# BARE-MENTION BLOCKLIST — BOOK_ALIASES entries that are ALSO ordinary
+# English words, so they must never resolve via extract_book_only()
+# (reference_extractor.py), which deliberately finds a book name with NO
+# accompanying chapter/verse number to anchor on. Fine for the full
+# reference extractor (chapter/verse-anchored matching won't false-fire
+# on plain prose), but "africans"/"african" here exist purely as ASR-
+# mishearing tolerance for "Ephesians" ("Africans 2:8" -> Ephesians
+# 2:8) — with no number requirement, ordinary sentences ("the africans
+# in the congregation stood up and sang") would otherwise scope a
+# semantic search to Ephesians for no real reason. Real/distinctive book
+# names and mishearings that aren't also common words (e.g.
+# "effusions") don't need to be listed here.
+BARE_MENTION_BLOCKLIST: set[str] = {
+    "africans",
+    "african",
+}
+
+# ============================================================
 # NUMBER WORDS — compound-literal style (used by version_detector.py's
 # _normalise_numbers for verse-range detection: plain string substitution,
 # so compounds like "twenty one" need their own literal entry)

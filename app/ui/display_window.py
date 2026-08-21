@@ -278,7 +278,25 @@ class DisplayWindow(QWidget):
         self._animate(self._ref_label,   0.0, 1.0)
 
     def _animate(self, widget, start: float, end: float):
-        anim = QPropertyAnimation(widget, b"opacity")
+        # A rapid re-trigger (two show_verse()/clear() calls inside one
+        # FADE_MS window — e.g. two AI detections landing close
+        # together) used to just overwrite widget._anim with the new
+        # animation, dropping the only Python reference to the still-
+        # running previous one. With no Qt parent, that previous
+        # QPropertyAnimation had nothing else keeping it alive and could
+        # be garbage-collected mid-flight — its `finished` signal (which
+        # _fade_out's caller relies on to run _set_content) then never
+        # fires. Explicitly stopping it first makes the interruption
+        # deterministic instead of GC-timing-dependent, and giving the
+        # new animation `self` as its Qt parent ties its C++ lifetime to
+        # this long-lived window instead of the transient widget
+        # attribute, so it can't be collected out from under Qt while
+        # still running.
+        old = getattr(widget, "_anim", None)
+        if old is not None:
+            old.stop()
+
+        anim = QPropertyAnimation(widget, b"opacity", self)
         anim.setDuration(self.FADE_MS)
         anim.setStartValue(start)
         anim.setEndValue(end)

@@ -42,7 +42,7 @@ if os.path.isdir(_torch_lib):
 
 from app.retrieval.hybrid import HybridEngine, db_list_versions, db_get_verse
 from app.retrieval.reference_extractor import extract_reference, _BOOK_ALIASES
-from app.asr.transcriber import BibleAITranscriber, Config
+from app.asr.factory import create_transcriber
 from app.ui.display_window import DisplayWindow
 from app.ui.theme_model import Theme
 from app.ui import theme_store
@@ -53,7 +53,7 @@ from app.ui import style_kit
 from app.ui import queue_store
 
 from PyQt5.QtGui import QPalette, QColor
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSettings
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSettings, QTimer
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QTextEdit, QLineEdit, QComboBox, QFrame,
@@ -627,17 +627,18 @@ class ASRWorker(QThread):
     transcript_signal = pyqtSignal(str)
     status_signal     = pyqtSignal(str)
 
-    def __init__(self, device_index=None, engine=None, parent=None):
+    def __init__(self, device_index=None, engine=None, language="en", parent=None):
         super().__init__(parent)
         self.device_index = device_index
         self.engine       = engine
+        self.language     = language
         self.transcriber  = None
 
     def run(self):
         try:
             self.status_signal.emit("loading")
-            self.transcriber = BibleAITranscriber(
-                Config(device_index=self.device_index)
+            self.transcriber = create_transcriber(
+                self.language, device_index=self.device_index
             )
 
             def _on_text(text: str):
@@ -735,6 +736,16 @@ class OperatorWindow(QMainWindow):
         # AI Detections state — persists across theme rebuilds.
         self._detections: List[dict] = []
         self._new_count:  int = 0
+
+        # Semantic Detections state — a separate panel/list from AI
+        # Detections above, showing only match_type=="semantic" verses.
+        # Independent on purpose: AI Detections is the complete activity
+        # log (every engine decision, including deterministic nav/direct-
+        # reference hits); this panel exists so an operator can watch
+        # just the probabilistic guesses — the ones actually worth a
+        # second look — without direct/nav/command entries diluting it.
+        self._semantic_detections: List[dict] = []
+        self._new_semantic_count: int = 0
 
         # Queue state — persists across theme rebuilds.
         self._queue: List[dict] = []
@@ -992,8 +1003,9 @@ class OperatorWindow(QMainWindow):
         split.setStyleSheet(
             f"QSplitter::handle {{ background: {_t('border')}; }}")
         split.addWidget(self._build_detections())
+        split.addWidget(self._build_semantic_detections())
         split.addWidget(self._build_queue())
-        split.setSizes([420, 260])
+        split.setSizes([320, 240, 220])
 
         lay.addWidget(split)
         return w
@@ -1113,6 +1125,117 @@ class OperatorWindow(QMainWindow):
             if item.widget():
                 item.widget().deleteLater()
         self._det_empty_hint.show()
+
+    # ── Semantic Detections — separate panel, semantic-only ─────────
+    # Mirrors _build_detections/_add_detection_card above exactly, but
+    # keyed off its own state (self._semantic_detections) and filtered to
+    # match_type=="semantic" only — see the state comment in __init__ for
+    # why this is a fully independent panel rather than a filter toggle
+    # on the existing one.
+
+    def _build_semantic_detections(self):
+        card = _card()
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(14, 12, 14, 12)
+        lay.setSpacing(8)
+
+        header = QHBoxLayout()
+        header.addWidget(lbl("Semantic Detections", 13, "text_p", True))
+        header.addStretch()
+
+        self._new_semantic_badge = QPushButton("")
+        self._new_semantic_badge.setFixedHeight(24)
+        self._new_semantic_badge.setStyleSheet(btn_qss("active"))
+        self._new_semantic_badge.clicked.connect(
+            self._jump_to_semantic_detections_top)
+        self._new_semantic_badge.hide()
+        header.addWidget(self._new_semantic_badge)
+
+        clear = QPushButton("Clear")
+        clear.setStyleSheet(btn_qss())
+        clear.setFixedHeight(24)
+        clear.clicked.connect(self._clear_semantic_detections)
+        header.addWidget(clear)
+        lay.addLayout(header)
+
+        self._sem_det_scroll = QScrollArea()
+        self._sem_det_scroll.setWidgetResizable(True)
+        self._sem_det_scroll.setStyleSheet(
+            "QScrollArea { border: none; background: transparent; }")
+
+        container = QWidget()
+        container.setStyleSheet("background: transparent;")
+        self._sem_det_layout = QVBoxLayout(container)
+        self._sem_det_layout.setContentsMargins(0, 0, 6, 0)
+        self._sem_det_layout.setSpacing(8)
+        self._sem_det_empty_hint = lbl(
+            "No semantic detections yet — paraphrased/quoted scripture "
+            "will show up here.",
+            11, "text_d")
+        self._sem_det_empty_hint.setWordWrap(True)
+        self._sem_det_layout.addWidget(self._sem_det_empty_hint)
+        self._sem_det_layout.addStretch()
+
+        self._sem_det_scroll.setWidget(container)
+        self._sem_det_scroll.verticalScrollBar().valueChanged.connect(
+            self._on_semantic_detections_scrolled)
+
+        lay.addWidget(self._sem_det_scroll, stretch=1)
+
+        self._rerender_semantic_detections()
+        return card
+
+    def _rerender_semantic_detections(self):
+        for i, v in enumerate(self._semantic_detections):
+            self._sem_det_layout.insertWidget(i, self._make_detection_card(v))
+
+    def _add_semantic_detection_card(self, verse: dict):
+        if str(verse.get("match_type", "")) != "semantic":
+            return
+        if float(verse.get("confidence", 0)) < DETECTION_MIN_CONFIDENCE:
+            return
+
+        was_at_top = self._sem_det_scroll.verticalScrollBar().value() <= 0
+
+        self._sem_det_empty_hint.hide()
+        self._semantic_detections.insert(0, verse)
+        self._sem_det_layout.insertWidget(0, self._make_detection_card(verse))
+
+        while len(self._semantic_detections) > DETECTION_MAX_CARDS:
+            self._semantic_detections.pop()
+            old_item = self._sem_det_layout.itemAt(
+                self._sem_det_layout.count() - 3)
+            if old_item and old_item.widget():
+                old_item.widget().deleteLater()
+
+        if was_at_top:
+            self._sem_det_scroll.verticalScrollBar().setValue(0)
+            self._new_semantic_count = 0
+            self._new_semantic_badge.hide()
+        else:
+            self._new_semantic_count += 1
+            self._new_semantic_badge.setText(f"{self._new_semantic_count} new ▲")
+            self._new_semantic_badge.show()
+
+    def _on_semantic_detections_scrolled(self, value):
+        if value <= 0 and self._new_semantic_count:
+            self._new_semantic_count = 0
+            self._new_semantic_badge.hide()
+
+    def _jump_to_semantic_detections_top(self):
+        self._sem_det_scroll.verticalScrollBar().setValue(0)
+        self._new_semantic_count = 0
+        self._new_semantic_badge.hide()
+
+    def _clear_semantic_detections(self):
+        self._semantic_detections.clear()
+        self._new_semantic_count = 0
+        self._new_semantic_badge.hide()
+        while self._sem_det_layout.count() > 2:
+            item = self._sem_det_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._sem_det_empty_hint.show()
 
     def _on_detection_preview(self, verse: dict):
         self._engine.manual_display(
@@ -1586,7 +1709,8 @@ class OperatorWindow(QMainWindow):
         self._ver_combo.clear()
         for v in db_list_versions():
             self._ver_combo.addItem(v)
-        current = str(self._engine.session.active_version).upper()
+        current, _, _, _ = self._engine.position_snapshot()
+        current = current.upper()
         idx = self._ver_combo.findText(current, Qt.MatchFixedString)
         if idx >= 0:
             self._ver_combo.setCurrentIndex(idx)
@@ -1683,6 +1807,7 @@ class OperatorWindow(QMainWindow):
             version   = verse.get("version", "")
 
             self._add_detection_card(verse)
+            self._add_semantic_detection_card(verse)
 
             if verse.get("_below_confidence"):
                 # hybrid.py already judged this candidate against the
@@ -1858,11 +1983,9 @@ class OperatorWindow(QMainWindow):
     # ── Unified search / manual override ───────────────────
 
     def _book_mode_lookup(self, query: str) -> Optional[dict]:
-        version = str(self._engine.session.active_version)
+        version, book, chapter, _ = self._engine.position_snapshot()
 
-        if query.isdigit() and self._engine._has_position():
-            book = str(self._engine.session.current_book)
-            chapter = int(self._engine.session.current_chapter)
+        if query.isdigit() and book is not None and chapter is not None:
             return db_get_verse(version, book, chapter, int(query))
 
         # Same language gating the voice pipeline uses (hybrid.py's
@@ -1898,7 +2021,7 @@ class OperatorWindow(QMainWindow):
                 self._make_search_result_item(result))
             return
 
-        candidates = self._engine.semantic.search_top_k(query, k=8)
+        candidates = self._engine.search_top_k(query, k=8)
         # search_top_k() returns final_score, not the match_type/
         # confidence keys hybrid.py's pipeline adds — normalise here,
         # in the UI layer only, so badges render consistently.
@@ -1917,13 +2040,27 @@ class OperatorWindow(QMainWindow):
         # engine pipeline (nav commands, version switches, oddly-phrased
         # references). Typing here is always explicit, so it should
         # promote immediately, never held back by Auto/Manual mode.
-        # process() resolves synchronously, so this returns already applied.
+        #
+        # process() runs its own work synchronously, but the resulting
+        # _verse_cb -> _verse_sig.emit() -> _on_verse delivery is NOT
+        # synchronous — _verse_sig is connected with Qt.QueuedConnection
+        # unconditionally (see __init__), including when emitted from
+        # this, the main thread, since the same signal also carries
+        # results from the ASR background thread. Resetting the flag
+        # immediately after process() returns (the old `finally:` here)
+        # cleared it before the queued _on_verse call ever ran, silently
+        # defeating this override for a semantic-match result. Deferred
+        # via singleShot(0, ...) instead, so the reset is itself queued
+        # behind the already-queued verse signal and _on_verse sees the
+        # flag still set when it actually runs.
         self._tx.append(f'[typed] {query}')
         self._explicit_pipeline_call = True
         try:
             self._engine.process(query)
         finally:
-            self._explicit_pipeline_call = False
+            QTimer.singleShot(
+                0, lambda: setattr(self, "_explicit_pipeline_call", False)
+            )
 
     def _make_search_result_item(self, verse: dict) -> SearchResultItem:
         item = SearchResultItem(verse)
@@ -1954,7 +2091,7 @@ class OperatorWindow(QMainWindow):
         # whatever was last shown via search.
         book, chapter, vnum = verse.get("book"), verse.get("chapter"), verse.get("verse")
         if book and chapter and vnum:
-            self._engine.session.update_position(str(book), int(chapter), int(vnum))
+            self._engine.sync_position(book, chapter, vnum)
         self._promote_to_preview(verse)
 
     def _toggle_display(self):
@@ -2017,8 +2154,9 @@ class OperatorWindow(QMainWindow):
 
         if kind == "browse":
             if self._browse_panel is None:
+                initial_version, _, _, _ = self._engine.position_snapshot()
                 self._browse_panel = BrowsePanel(
-                    initial_version=str(self._engine.session.active_version))
+                    initial_version=initial_version)
                 self._browse_panel.send_preview.connect(
                     lambda v: self._promote_search_result(v, force_go_live=False))
                 self._browse_panel.add_queue.connect(self._add_to_queue)

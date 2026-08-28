@@ -76,10 +76,22 @@ SIMILARITY_THRESHOLD = 0.45   # minimum FAISS cosine score
 LEXICAL_THRESHOLD = 0.60   # minimum score for lexical fallback
 DISPLAY_THRESHOLD = 0.58   # minimum final score to display
 # Raised bar for queries under MIN_SEMANTIC_TOKENS content words — short
-# phrases can genuinely score 0.64+ (see _PHRASE_MAP), well above
-# DISPLAY_THRESHOLD, but also risk scoring high "by chance" on shared
-# vocabulary alone, which is what MIN_SEMANTIC_TOKENS guards against.
-SHORT_QUERY_DISPLAY_THRESHOLD = 0.62
+# phrases can genuinely score well above DISPLAY_THRESHOLD, but also risk
+# scoring high "by chance" on shared vocabulary alone, which is what
+# MIN_SEMANTIC_TOKENS guards against. Raised 0.62 -> 0.75 after a confirmed
+# live false positive: "so jesus said," (2 content tokens: "jesus",
+# "said") scored 0.63 against Matthew 26:49 ("And Jesus said unto him,
+# Friend, wherefore art thou come?...") — comfortably clearing the old
+# 0.62 bar purely because Gospel narrative is full of near-identical
+# "and Jesus said unto them..." framing clauses, not because this
+# utterance actually paraphrased that specific verse. Any short phrase
+# that genuinely deserves to match reliably (see the "it is finished"
+# case this threshold was originally raised for) is better served by a
+# curated _PHRASE_MAP entry, which this project has consistently done for
+# exactly that reason — a statistical bar this low can't safely
+# distinguish "this IS a famous short phrase" from "this shares a common
+# narrative-framing pattern with hundreds of unrelated verses."
+SHORT_QUERY_DISPLAY_THRESHOLD = 0.75
 DEFAULT_TOP_K = 20
 INDEX_SIGNATURE = "semantic_lexical_v7"
 
@@ -118,6 +130,18 @@ MIN_SEMANTIC_TOKENS = 3
 # unrelated story) now correctly falls through to the real scored path
 # instead of an unconditional 100%.
 PHRASE_MAP_COVERAGE_MIN = 0.35
+
+# Minimum cleaned-query length for _lexical_score_from_parts's verbatim-
+# substring short-circuit (lex_score=1.0, which then bypasses the
+# semantic-similarity floor in _clears_display_threshold — see that
+# docstring). Raised from 10 -> 20: the two confirmed real cases this
+# short-circuit was added for ("eat drink and be merry", "let him kiss me
+# with the kisses of his mouth") are both well clear of 20 chars, but 10
+# was low enough that an ordinary short spoken clause could land as a
+# literal substring inside some unrelated verse's much longer text by
+# pure chance, then bypass the similarity check and display that
+# irrelevant verse with full confidence.
+VERBATIM_MATCH_MIN_CHARS = 20
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INDEX_DIR = os.path.join(BASE_DIR, "..", "..", "models", "indexes")
@@ -498,7 +522,18 @@ def _lexical_score_from_parts(
     if not q_clean or not v_clean:
         return 0.0
 
-    if len(q_clean) >= 10 and q_clean in v_clean:
+    # Verbatim-substring short-circuit — deliberately a high bar (see
+    # VERBATIM_MATCH_MIN_CHARS) because _clears_display_threshold lets a
+    # lex_score>=0.95 candidate bypass the semantic-similarity floor
+    # entirely (see that docstring for the two confirmed real cases this
+    # exists for, both far longer than the floor). A LOW floor here
+    # instead let short, ordinary spoken clauses (10-19 chars — "in the
+    # lord", "of the spirit") match by pure chance as a substring
+    # somewhere inside some unrelated verse's much longer text, then
+    # bypass the similarity check and display that irrelevant verse with
+    # full confidence — confirmed as a real source of unrelated verses
+    # surfacing for short, generic phrases.
+    if len(q_clean) >= VERBATIM_MATCH_MIN_CHARS and q_clean in v_clean:
         return 1.0
 
     if not q_tokens or not v_set:

@@ -1781,3 +1781,139 @@ observed breakage to justify it yet.
   own panel correctly stayed on its fixed dark identity per
   `style_kit.py`) → confirmed Genesis 1 still selected → closed via the
   panel's own ✕ button, not the topbar toggle.
+
+---
+
+## 25. Mixer board audio input — diagnosed, not yet resolved (no code changed)
+
+Operator connected an external mixer board, intending it as the audio
+source for live transcription. Purely diagnostic session — **no files in
+the repo were touched**; everything below was run ad-hoc against
+`sounddevice` directly (not through `transcriber.py`, per the standing
+rule not to edit that file unassisted).
+
+**Device enumeration** (`sd.query_devices()`): no new USB audio device
+appeared after connecting. What did change: input device index **1**
+(`sd.default.device[0]`, the OS default input) was relabeled by Windows
+from `"Microphone (Realtek(R) Audio)"` to `"aux (Realtek(R) Audio)"` —
+Realtek's own jack-detection reacting to a different source type on that
+physical jack. Conclusion: the mixer is wired in via an analog 3.5mm
+cable into the PC's onboard mic/line-in jack, not USB — there is no
+separate mixer device to select; `device_index=1` (or `None`, since it's
+still the OS default) is the correct one for `TranscriberConfig`.
+
+**Signal test**: recorded 4s directly from device 1 while asking the
+operator to have the mixer active. Result: peak level 0.0033, RMS 0.0007,
+zero clipped samples — indistinguishable from noise floor, no real signal
+arriving. Likely causes, not yet narrowed down further (operator was mid-
+troubleshooting when the session ended): mixer channel/master fader down,
+wrong output bus cabled to the PC (e.g. aux send instead of main/control
+room out), a muted/unsoloed channel on the mixer, or Windows-side input
+mute/zero level on that jack.
+
+### Not verified
+- Whether the mixer actually produces a usable signal once fader/routing
+  is corrected — needs a re-run of the same 4-second capture test after
+  the operator adjusts the mixer.
+- Mixer make/model was never identified, so a driver requirement (vs.
+  pure analog passthrough) can't be fully ruled out.
+- No code changes were needed or made this session; this section exists
+  purely as a record of the diagnostic findings for next time.
+
+---
+
+## 26. Split-utterance handling generalized to nav/verse-jump, a bare book mention now scopes the next semantic search, and two more false-positive gates tightened after live confirmation
+
+`hybrid.py` and `semantic.py` only — no `transcriber.py` change (per the
+standing rule not to edit that file unassisted; nothing here needed one).
+
+**Split-utterance combining, generalized.** §12/§25's predecessor sessions
+already handled a direct reference split across a mid-phrase ASR
+endpointing pause (e.g. "Leviticus" / "27"). That logic is now factored
+into one shared helper, `_short_trailing_fragment()` — combines the
+current utterance with the immediately preceding one only when the
+current one is a short trailing fragment (≤4 words) and real sentence
+history exists — and reused at three more call sites that have the exact
+same failure mode:
+- **Navigation**: every `NAV_PHRASES` entry is 2-4 words ("next verse",
+  "go to previous verse") — a pause after "go to" previously lost the
+  command entirely (falls through to the slow semantic path with nothing
+  to match). Confirmed live: "go to" / "next verse" spoken as two
+  utterances now correctly fires Next Verse.
+- **Verse jump**: `detect_verse_jump()`'s regex requires "verse" and the
+  number in the same string — "verse" / "twenty" previously matched
+  nothing. Confirmed live: now resolves to the correct verse.
+- **Semantic search**: a single immediate retry against the combined text
+  when the utterance alone matched nothing at all. Deliberately **not**
+  the persistent, delayed rolling-context-window design tried and
+  reverted before (§15/§20) — no delay on the normal path, and only the
+  one immediately preceding utterance is ever considered, so a stale word
+  can't silently ride into a much later, unrelated utterance's score.
+  This replaces the transcriber-flag-based "forced-cut continuation"
+  approach from the 2026-08-14 session, which depended on `transcriber.py`
+  changes that were removed along with the reverted Twi-backend merge —
+  this version needs no transcriber cooperation at all.
+
+**Bare book mention now scopes the next semantic search.** A book named
+with no resolvable verse in the same utterance ("in the book of Ezekiel,"
+said before any paraphrase follows) previously carried zero search
+weight — it cleared no threshold anywhere, so the very next utterance's
+real paraphrase got an unscoped, whole-Bible search. `_announced_book`/
+`_announced_at` now remember it for `ANNOUNCED_BOOK_TIMEOUT` (90s — longer
+than `TRACKING_TIMEOUT`'s 30s, since naming a book before preaching from
+it is a slower-paced signal than an actively-tracked verse and should
+survive a few sentences of scene-setting). `_current_context_book()`
+falls back to it only when nothing is actively tracked — a live
+`verse_tracking` position still wins when both are present. Confirmed
+live: "let's turn now to the book of Ezekiel" followed by "the wheels
+within wheels that Ezekiel saw in his vision" now correctly resolves
+within Ezekiel instead of risking an unscoped whole-Bible match.
+
+**Two more false-positive gates tightened**, both after a confirmed live
+case, same pattern as §25's predecessor session's phrase_map/event_map
+gates:
+- `SHORT_QUERY_DISPLAY_THRESHOLD` (semantic.py) raised **0.62 → 0.75**.
+  "so jesus said" (2 content tokens) scored 0.63 against Matthew 26:49
+  purely on shared Gospel narrative-framing vocabulary, clearing the old
+  bar despite not actually paraphrasing that verse. Confirmed still a
+  no-match after the fix (see testing below).
+- `VERBATIM_MATCH_MIN_CHARS` (semantic.py, the verbatim-substring
+  short-circuit in `_lexical_score_from_parts` — a match here bypasses
+  the similarity floor entirely) raised **10 → 20**. A 10-char floor let
+  short, ordinary spoken clauses (10-19 chars — "in the lord," "of the
+  spirit") substring-match by chance inside an unrelated verse's much
+  longer text and display it with full confidence. The two real cases
+  this short-circuit exists for ("eat drink and be merry", "let him kiss
+  me with the kisses of his mouth") are both well clear of 20 chars.
+
+Also reverted: `hybrid.py`'s true-no-match path previously surfaced the
+single best raw semantic candidate regardless of score, bypassing
+`semantic.py`'s own internal display bar, so the operator could see what
+the engine came closest to. Removed — confirmed live it surfaced
+low-value noise (e.g. a 41%-score guess) more often than a genuinely
+useful near-miss, and the existing bar-miss case (a candidate that
+cleared semantic.py's own bar, just not this caller's stricter
+contextual one) already covers the "real candidate, not confident enough
+right now" case with a much higher floor.
+
+**Testing**:
+- `py_compile` clean on both files.
+- `accuracy_eval` starter set: 87.0% (unchanged), 0% false-positive rate,
+  100% direct-reference — matches the documented baseline exactly.
+- `accuracy_eval` stress/generalization sets: 74.1%/64.5%, essentially
+  unchanged from the documented 74.5%/64.5% baseline. Verified the small
+  residual gap is pre-existing, not caused by this session's changes, by
+  running the same generalization set against the last committed version
+  (`git stash`) — identical confusion list, including the one case that
+  looked suspicious at first glance ("eat drink and be merry," one of
+  `VERBATIM_MATCH_MIN_CHARS`'s own two named cases, still no-matches
+  identically on both — the miss is upstream of that short-circuit, not
+  caused by raising it).
+- `pytest tests/` — 42/42 passed, offscreen Qt.
+- Manual end-to-end script against the real `HybridEngine` (real DB, real
+  semantic index, no mocks) — all five scenarios above (split verse-jump,
+  split navigation, announced-book scoping, a real split semantic
+  paraphrase, and the "so jesus said" false-positive check) produced the
+  expected result. Log excerpt for the announced-book case:
+  `Book named with no resolvable verse yet — scoping semantic search to
+  Ezekiel for the next 90s` → next utterance resolved to Ezekiel 1:16.

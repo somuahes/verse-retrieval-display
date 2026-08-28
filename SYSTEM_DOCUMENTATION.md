@@ -17,6 +17,26 @@ updated for four new Operator Panel features (Browse, Session History,
 Queue reorder/save-load, Save-Image) and a `tests/` integration suite —
 see `PROGRESS.md` §22 for the full narrative.
 
+**Addendum, 2026-08-23** (diagnostic only, no code changed): §5 gained a
+new known issue — an external mixer board connected as the audio input
+source is wired in via analog 3.5mm (not USB; no new device is enumerated,
+Windows just relabels the existing onboard jack `Microphone` → `aux`), and
+currently produces no usable signal (near-silent capture test). See
+`PROGRESS.md` §25.
+
+**Addendum, 2026-08-28** (§3.2 retrieval logic only — no ASR/UI change):
+`hybrid.py`'s mid-phrase-pause split-utterance combining (previously
+direct-reference-only) now also covers navigation and verse-jump
+commands, and a bare book mention with no resolvable verse ("in the book
+of Ezekiel") now scopes the next semantic search to that book for 90s
+instead of carrying no search weight at all. `semantic.py`'s short-query
+display bar (0.62→0.75) and verbatim-substring-match floor (10→20 chars)
+were both raised after confirmed live false positives. All changes
+verified against the real engine (42/42 pytest, `accuracy_eval` starter
+set unchanged at 87.0%/0% false-positive, stress/generalization sets
+unchanged within noise of the pre-existing baseline) — see `PROGRESS.md`
+§26 for the full narrative.
+
 ---
 
 ## 1. What the system is
@@ -338,6 +358,13 @@ Twi), 1 upgraded from "not started" to "in progress" this session.**
    environment.
 8. **NIV/NLT gap is a licensing constraint**, unchanged from the prior
    session — stated explicitly so it reads as a researched decision.
+9. **External mixer board audio input is unresolved.** Connected via
+   analog 3.5mm into the onboard mic/line-in jack (no new USB device
+   enumerates; Windows relabels the existing default input `Microphone` →
+   `aux`), but a direct capture test off that device returned near-silent
+   levels (peak 0.0033) — no usable signal yet. Likely a fader/routing
+   issue on the mixer itself, not narrowed down further. See `PROGRESS.md`
+   §25.
 
 `TRANSCRIPTION_SETUP.md`, flagged stale in the prior version of this
 document, was corrected this session (it now documents the real

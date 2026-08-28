@@ -81,6 +81,16 @@ logging.basicConfig(
 
 TRACKING_TIMEOUT = 30
 
+# How long a bare book mention with no resolvable verse ("in the book of
+# Ezekiel", said as its own utterance with no accompanying paraphrase)
+# keeps scoping semantic search to that book — see _announced_book in
+# __init__ and its use in _current_context_book. Longer than
+# TRACKING_TIMEOUT: an operator naming a book before preaching from it for
+# a while is a slower-paced signal than an actively-tracked verse, and
+# should survive a few sentences of scene-setting before the first real
+# paraphrase arrives.
+ANNOUNCED_BOOK_TIMEOUT = 90.0
+
 # A single spoken nav phrase (e.g. "next verse") should trigger exactly one
 # navigation step. Cooldown guards against any duplicate detection from the
 # same utterance being processed twice; does NOT apply to direct
@@ -527,6 +537,15 @@ class HybridEngine:
         self._pending_ambiguous_nav: Optional[str] = None
         self._pending_ambiguous_nav_time: float = 0.0
 
+        # A book named with no resolvable verse in the same utterance
+        # ("in the book of Ezekiel") — see ANNOUNCED_BOOK_TIMEOUT and
+        # _current_context_book. Distinct from session.current_book,
+        # which only reflects a book a verse was actually DISPLAYED
+        # from; this is a weaker, purely advisory signal that never
+        # implies a position or survives past its own timeout.
+        self._announced_book: Optional[str] = None
+        self._announced_at: float = 0.0
+
         # Whole-utterance-granularity buffer — only used by
         # _extract_split_reference, which needs a complete previous
         # utterance's text, not a word-count window.
@@ -607,13 +626,53 @@ class HybridEngine:
         "sequential-only" gate on leaving that book — trying same-book
         first is cheap and safe; the HI bar is specifically about the
         much riskier case of jumping to a DIFFERENT book, which only
-        needs the higher bar while a deliberate walk-through is active."""
+        needs the higher bar while a deliberate walk-through is active.
+
+        Falls back to a recently-announced bare book mention (see
+        _announced_book) when nothing is actively tracked — a preacher
+        saying "in the book of Ezekiel" as its own utterance, with no
+        paraphrase to resolve yet, previously scoped nothing at all: the
+        mention cleared no threshold anywhere, so the very next
+        utterance's real paraphrase got an unscoped, whole-Bible search
+        instead of one narrowed to the book that was just named. An
+        active verse_tracking position still wins when both are present
+        — it's live, confirmed evidence, stronger than an announcement
+        alone."""
         tracking = getattr(self.session, "state", "") == "verse_tracking"
-        return (
-            str(self.session.current_book)
-            if tracking and self._has_position()
-            else None
-        )
+        if tracking and self._has_position():
+            return str(self.session.current_book)
+
+        if (
+            self._announced_book
+            and time.time() - self._announced_at <= ANNOUNCED_BOOK_TIMEOUT
+        ):
+            return self._announced_book
+
+        return None
+
+    def _short_trailing_fragment(self, text: str) -> Optional[str]:
+        """Combines this utterance with the immediately preceding one when
+        this one looks like the tail half of a command/reference that
+        ASR's signal-driven endpointing split across a mid-phrase pause
+        (e.g. "go to previous" ... "verse", or "Leviticus" ... "27") —
+        shared by the navigation, verse-jump, and direct-reference
+        split-fallbacks below, all of which need a complete multi-word
+        phrase/pattern that neither half alone contains. Deliberately
+        narrow: only tried when THIS utterance is a short trailing
+        fragment (<=4 words, cheap to rule out on the common case) and
+        real sentence history exists — combined with each caller's own
+        detector needing a specific match in the joined text, this is
+        narrow enough not to revive an unrelated command/reference from
+        an earlier utterance on a random short one. Returns the combined
+        text, or None if this utterance doesn't look like a split
+        fragment at all."""
+        if len(text.split()) > 4:
+            return None
+
+        if len(self._sentence_history) < 2:
+            return None
+
+        return f"{self._sentence_history[-2]} {text}"
 
     def _extract_split_reference(
         self, text: str
@@ -624,25 +683,12 @@ class HybridEngine:
         so the single-utterance extract_reference() call above misses
         both, and the utterance falls through to the slow semantic path
         with no real chance of matching (it isn't a paraphrase of any
-        verse).
-
-        Only tried when the current utterance is a short trailing
-        fragment (<=4 words, cheap to rule out on the common case) —
-        combined with requiring a real book alias to already be present
-        in the *previous* utterance for extract_reference to find
-        anything at all in the joined text, this is narrow enough not to
-        revive an unrelated reference from an earlier utterance on a
-        random short one. Returns (ref, combined_source_text) or
-        (None, None).
+        verse). Returns (ref, combined_source_text) or (None, None).
         """
-        if len(text.split()) > 4:
+        combined = self._short_trailing_fragment(text)
+        if not combined:
             return None, None
 
-        if len(self._sentence_history) < 2:
-            return None, None
-
-        previous = self._sentence_history[-2]
-        combined = f"{previous} {text}"
         ref = extract_reference(combined, allowed_languages=self._allowed_languages())
 
         if ref:
@@ -1035,6 +1081,28 @@ class HybridEngine:
         # 2. Navigation
         # ====================================================
         nav = detect_navigation(text)
+        nav_source_text = text
+
+        if not nav:
+            # Every NAV_PHRASES entry is 2-4 words ("next verse", "go to
+            # previous verse", "clear the screen", ...) — a mid-phrase
+            # pause splits it across two utterances the same way a spoken
+            # book reference can (see _short_trailing_fragment), and
+            # neither half alone contains the full phrase detect_navigation
+            # needs. Without this, the command is silently lost: "next"
+            # alone isn't in NAV_MAP, so it falls through to the slow
+            # semantic path with no real chance of matching anything.
+            combined = self._short_trailing_fragment(text)
+            if combined:
+                nav = detect_navigation(combined)
+                if nav:
+                    nav_source_text = combined
+                    log.info(
+                        "Navigation '%s' found only after combining with "
+                        "the previous utterance (split by a mid-phrase "
+                        "pause): %r",
+                        nav, combined[:100],
+                    )
 
         if nav:
             now = time.time()
@@ -1051,7 +1119,7 @@ class HybridEngine:
                 )
                 return True
 
-            if nav_requires_confirm(text):
+            if nav_requires_confirm(nav_source_text):
                 if (
                     self._pending_ambiguous_nav == nav
                     and now - self._pending_ambiguous_nav_time
@@ -1066,7 +1134,7 @@ class HybridEngine:
                     log.info(
                         "Ambiguous nav '%s' detected (%r) — waiting up to "
                         "%.0fs for a confirming repeat before acting",
-                        nav, text[:60], AMBIGUOUS_NAV_CONFIRM_WINDOW,
+                        nav, nav_source_text[:60], AMBIGUOUS_NAV_CONFIRM_WINDOW,
                     )
                     self._pending_ambiguous_nav = nav
                     self._pending_ambiguous_nav_time = now
@@ -1217,6 +1285,20 @@ class HybridEngine:
                         self._log_semantic_shadow(text, r)
                         return True
 
+                # No resolvable verse in THIS utterance, but the book
+                # itself was a real, deliberate mention ("in the book of
+                # Ezekiel", said before any paraphrase follows) — remember
+                # it so the next utterance's semantic search is scoped to
+                # this book instead of an unscoped, whole-Bible search.
+                # See _current_context_book/ANNOUNCED_BOOK_TIMEOUT.
+                self._announced_book = named_book
+                self._announced_at = time.time()
+                log.info(
+                    "Book named with no resolvable verse yet — scoping "
+                    "semantic search to %s for the next %.0fs: %r",
+                    named_book, ANNOUNCED_BOOK_TIMEOUT, text[:100],
+                )
+
         # ====================================================
         # 4. Verse jump — only if no direct reference was found. E.g. from
         # John 3:16, "verse 20" resolves to John 3:20.
@@ -1230,6 +1312,26 @@ class HybridEngine:
 
         if jump_book:
             target = detect_verse_jump(text)
+            jump_source_text = text
+
+            if target is None:
+                # detect_verse_jump's regex requires "verse" and the
+                # number in the SAME string ("verse twenty") — a
+                # mid-phrase pause splits these across two utterances the
+                # same way a book reference can (see
+                # _short_trailing_fragment), and "twenty" alone matches
+                # nothing on its own.
+                combined = self._short_trailing_fragment(text)
+                if combined:
+                    target = detect_verse_jump(combined)
+                    if target is not None:
+                        jump_source_text = combined
+                        log.info(
+                            "Verse jump found only after combining with "
+                            "the previous utterance (split by a "
+                            "mid-phrase pause): %r",
+                            combined[:100],
+                        )
 
             if target:
                 r = db_get_verse(
@@ -1247,7 +1349,7 @@ class HybridEngine:
                         r["verse"],
                     )
 
-                    self._tag_command(r, "verse_jump", text)
+                    self._tag_command(r, "verse_jump", jump_source_text)
                     self._display(r)
                     self._set_state("sequential")
                     return True
@@ -1383,6 +1485,37 @@ class HybridEngine:
         log.info("Semantic (%d words): %r", len(text.split()), text)
 
         sem = self.semantic.search(text, context_book=context_book)
+        sem_source_text = text
+
+        if not sem:
+            # This utterance alone may be an incomplete fragment of one
+            # continuous thought ASR's signal-driven endpointing split
+            # across a mid-phrase pause (e.g. "...he was tempted in all
+            # points." / "but without sin." spoken as two separate
+            # utterances — together, Hebrews 4:15; neither half alone
+            # paraphrases anything). A single, immediate retry against
+            # the combined text — NOT the persistent, delayed
+            # rolling-window design tried and reverted before (see this
+            # method's own docstring): no delay is added to the normal
+            # path, and only the ONE immediately preceding utterance is
+            # ever considered, only when THIS utterance alone matched
+            # nothing at all, so a stale word can't silently ride into a
+            # much later, unrelated utterance's score the way the
+            # reverted design's open-ended buffer did.
+            combined = self._short_trailing_fragment(text)
+            if combined:
+                combined_sem = self.semantic.search(
+                    combined, context_book=context_book
+                )
+                if combined_sem:
+                    sem = combined_sem
+                    sem_source_text = combined
+                    log.info(
+                        "Semantic match found only after combining with "
+                        "the previous utterance (one thought split by a "
+                        "mid-phrase pause): %r",
+                        combined[:100],
+                    )
 
         if sem:
             final_score = float(sem.get("final_score", 0))
@@ -1424,7 +1557,7 @@ class HybridEngine:
                     r["match_type"] = "semantic"
                     r["confidence"] = final_score
                     r["matched_at"] = time.time()
-                    r["source_text"] = text
+                    r["source_text"] = sem_source_text
                     self._display(r)
                     return
 
@@ -1432,7 +1565,7 @@ class HybridEngine:
                 sem["match_type"] = "semantic"
                 sem["confidence"] = final_score
                 sem["matched_at"] = time.time()
-                sem["source_text"] = text
+                sem["source_text"] = sem_source_text
                 self._display(sem)
                 return
 
@@ -1461,7 +1594,7 @@ class HybridEngine:
             notify["match_type"] = "semantic"
             notify["confidence"] = final_score
             notify["matched_at"] = time.time()
-            notify["source_text"] = text
+            notify["source_text"] = sem_source_text
             notify.setdefault("version", str(self.session.active_version))
             # Log-only: unlike the shadow-disagreement notify below (which
             # deliberately stays eligible for normal Auto/Manual promotion
@@ -1475,7 +1608,19 @@ class HybridEngine:
             return
 
         # ====================================================
-        # 6. No match
+        # 6. No match — semantic.py's own search() already checked
+        # phrase/event map and the FAISS+lexical hybrid and found nothing
+        # that cleared even ITS OWN internal display bar. Previously this
+        # also surfaced the single best raw candidate regardless of score
+        # (bypassing search()'s own bar via search_top_k directly) so the
+        # operator could see what the engine came closest to — reverted:
+        # confirmed live it surfaced low-value noise (e.g. a 41%-score
+        # guess) more often than a genuinely useful near-miss, and the
+        # bar-miss case above (which DID clear semantic.py's own internal
+        # threshold, just not this caller's stricter contextual one)
+        # already covers the "real candidate, just not confident enough
+        # right now" case with a much higher floor. Truly nothing found
+        # anywhere just means nothing shows, same as before that change.
         # ====================================================
         log.debug("No match: %s", text[:80])
 

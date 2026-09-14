@@ -260,32 +260,54 @@ test transcribed a full sentence perfectly).
 
 Speed history worth knowing if this ever needs revisiting: the plain
 ONNX build of this same model (int8-quantized) measured ~13s to decode
-a single 7s clip on this project's hardware — clearly too slow for live
-dispatch. Switching to this CTranslate2 build with `intra_threads=16`
-(the empirically-found sweet spot for this machine's 8 physical cores —
-going higher, e.g. 24/32, measured *worse*, 8.9s/7.7s, from thread
-contention) cut that to **~5.9s average** (best run 5.5s) — a real,
-more-than-2x improvement, but still not true real-time. A 7s clip
-taking ~6s to decode means the app will still gradually fall behind
-during continuous speech, just far less severely than the ~13-16s ONNX
-baseline. Same underlying weights/accuracy either way — this only
-changes inference speed. The README on that HF repo's own usage example
+a single 7s clip on the original tuning machine (8 physical cores) —
+clearly too slow for live dispatch. Switching to this CTranslate2 build
+cut that to **~5.9s average** (best run 5.5s) at `intra_threads=16` on
+that machine — a real, more-than-2x improvement, but still not true
+real-time. `app/asr/backends/w2vbert.py` now picks `intra_threads` from
+`os.cpu_count()` (capped 4–16) at load time instead of a hardcoded 16,
+so it adapts to whatever machine it actually runs on, and serializes
+concurrent decodes internally so two utterances dispatched at once don't
+each spin up their own thread pool and reproduce the same contention
+penalty (measured on the original machine at higher thread counts —
+8.9s/7.7s). Same underlying weights/accuracy either way — none of this
+changes decode quality. The README on that HF repo's own usage example
 uses the wrong CTranslate2 class (`Wav2Vec2` instead of the correct
 `Wav2Vec2Bert`) and passes a raw numpy array where a `StorageView` is
 required — don't copy it directly if revisiting this.
 
-Downloads on first use if not cached (~1.2GB); budget for this
-machine's known flaky huggingface.co connection on that first run.
+**Must be fetched once while online before first use** — downloads
+~1.2GB, and unlike the standalone CLI below, running this backend
+through the real app (`main_ui.py`) will NOT download it for you: see
+this Quick-start's own note above, `semantic.py` sets `HF_HUB_OFFLINE=1`
+process-wide, so `main_ui.py` refuses any network fetch, including this
+one. Run this once, before launching `main_ui.py`, while online:
+
+```bat
+python -c "from huggingface_hub import snapshot_download; from transformers import AutoProcessor; snapshot_download(repo_id='ghananlpcommunity/w2v-bert-2.0_twi_alpha_v1_farmerline-ct2'); AutoProcessor.from_pretrained('ghananlpcommunity/w2v-bert-2.0_twi_alpha_v1')"
+```
+
+Budget for this machine's known flaky huggingface.co connection on that
+first run. Once cached, every later load (CLI or app) is fully offline.
 
 ```bat
 python -m app.asr.transcriber --backend w2vbert --language ak
 ```
 
-Selectable from the operator panel too: the "Twi engine" dropdown next
-to the microphone device selector (only consulted when TWI is the
-active Bible version) lets an operator switch between Khaya and this
-offline fallback without touching config or restarting the app —
-useful for testing, or as a stopgap while waiting out a quota reset.
+Reachable from the real app now too: `app/asr/factory.py` currently
+defaults `create_transcriber("twi", ...)` to `backend="w2vbert"` (Khaya
+is still an unimplemented placeholder — pass `backend="khaya"`
+explicitly once it's filled in to go back to using it as the default).
+`main_ui.py` has its own "Language:" selector in the microphone card
+(English / Twi (offline · w2v-bert)), independent of the Bible version
+dropdown — you can transcribe Twi while displaying KJV, or English while
+displaying TWI, etc. Whichever one is selected there is what Start
+Listening uses, locked in at that moment same as the mic device picker;
+persisted across restarts via QSettings. This is a different concern
+from `hybrid.py`'s `_allowed_languages()`, which still gates Twi book-
+name/reference vocabulary recognition to whenever the TWI *version* is
+active, regardless of transcription language — that gate is about which
+Bible text is being searched, not which language is being spoken.
 
 Also evaluated and rejected as *not* an improvement: Meta's MMS
 (`facebook/mms-1b-all` with the `aka` language adapter) — a real,

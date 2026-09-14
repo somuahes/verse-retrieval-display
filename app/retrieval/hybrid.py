@@ -607,6 +607,28 @@ class HybridEngine:
             return {"en", "twi"}
         return {"en"}
 
+    def _semantic_enabled(self) -> bool:
+        """Gap found by testing: semantic.py has no language awareness at
+        all — self.semantic.search()/search_within_chapter()/
+        search_within_book() run the same English-only sentence-
+        transformer model (all-MiniLM-L6-v2) regardless of which Bible
+        version is active. A TWI.faiss index exists and switch_version()
+        happily loads it, so a semantic call against Twi text doesn't
+        crash — it just silently returns confident-looking nonsense, an
+        English embedding model scoring Twi verse text it was never
+        trained on. This was found and fixed once before (a Twi query
+        for "God loves the world" didn't surface John 3:16 in its top 5
+        results) but the fix didn't survive an unrelated revert (commit
+        1c8bce2) that took it out along with a bad merge. Direct-
+        reference matching (book/chapter/verse the operator actually
+        said) is completely unaffected — it never touches the embedding
+        model — so TWI still works for anything with a real reference;
+        only the "no reference, guess from paraphrase" path is gated
+        here. Re-embedding the corpus with a genuinely multilingual model
+        is the real fix if Twi semantic search is ever wanted; until
+        then, disabled is more honest than wrong."""
+        return str(self.session.active_version).upper() != "TWI"
+
     def _clear_position(self):
         if hasattr(self.session, "clear_position"):
             self.session.clear_position()
@@ -1163,6 +1185,28 @@ class HybridEngine:
 
         if ref_info:
             book, chapter, verse, verse_explicit = ref_info
+        elif detect_verse_jump(text) is not None:
+            # This utterance is already a complete, self-sufficient
+            # verse-jump command ("verse 10") — never hand it to the
+            # split-reference fallback below. Bug found by testing:
+            # _extract_split_reference combines a short trailing
+            # fragment with whichever utterance came right before it in
+            # _sentence_history, regardless of whether that fragment
+            # actually needed combining. "verse 10" said right after
+            # "Genesis 1:1" (a completely ordinary sequence — "turn to
+            # Genesis chapter 1 verse 1... now verse 10") was combining
+            # into "Genesis 1:1 verse 10", which extract_reference()
+            # parses as the FIRST complete pattern it finds (Genesis
+            # 1:1) — silently discarding "verse 10" and re-displaying
+            # the old verse instead of jumping to 10. Step 4 below
+            # already handles a bare "verse N" correctly against
+            # whatever position is currently tracked; this fragment was
+            # never incomplete in the first place; it never needed
+            # cross-utterance recombination. A bare "27" (the genuine
+            # split-reference case from Leviticus 27) has no "verse"
+            # keyword, so detect_verse_jump leaves it None here and this
+            # branch doesn't affect it.
+            book = chapter = verse = None
         else:
             # A spoken reference can land as two separate utterances if
             # the speaker pauses between the book name and the number
@@ -1192,8 +1236,11 @@ class HybridEngine:
                 # ("let's go to Romans 12") has no real paraphrase content
                 # to match, so this correctly finds nothing and falls
                 # through to the verse-1 default below, same as before.
-                stripped = strip_reference_words(text, book)
-                scoped = self.semantic.search_within_chapter(stripped, book, chapter)
+                scoped = None
+                if self._semantic_enabled():
+                    stripped = strip_reference_words(text, book)
+                    scoped = self.semantic.search_within_chapter(
+                        stripped, book, chapter)
 
                 if scoped:
                     verse = int(scoped.get("verse", verse))
@@ -1253,7 +1300,7 @@ class HybridEngine:
             named_book = extract_book_only(
                 text, allowed_languages=self._allowed_languages()
             )
-            if named_book:
+            if named_book and self._semantic_enabled():
                 stripped = strip_reference_words(text, named_book)
                 scoped = self.semantic.search_within_book(stripped, named_book)
 
@@ -1374,6 +1421,11 @@ class HybridEngine:
         session state, and never blocks the caller (runs on
         self._shadow_executor). See the comment on that executor in
         __init__ for why this exists."""
+        if not self._semantic_enabled():
+            # See _semantic_enabled's docstring — the English-only model
+            # has nothing meaningful to say about Twi text, so a
+            # "disagreement" here would just be noise, not a real signal.
+            return
         context_book = self._current_context_book()
         # See SEMANTIC_CONFIDENCE_HI's comment — the higher cross-book bar
         # applies only while actively sequential-navigating, not merely
@@ -1475,6 +1527,21 @@ class HybridEngine:
         """
         t0 = time.time()
         self._check_timeout()
+
+        if not self._semantic_enabled():
+            # See _semantic_enabled's docstring. Same outcome as "found
+            # nothing" (step 6 below) since that's exactly what this is —
+            # not a real search, so nothing to report as a candidate,
+            # only as a plain miss.
+            log.debug(
+                "Semantic search skipped — %s has no working embedding "
+                "model (English-only): %r",
+                self.session.active_version, text[:80],
+            )
+            if getattr(self.session, "state", "") == "context_matching":
+                if self._no_match_cb:
+                    self._no_match_cb()
+            return
 
         # See SEMANTIC_CONFIDENCE_HI's comment — the higher cross-book bar
         # applies only while actively sequential-navigating, not merely

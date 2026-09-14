@@ -105,20 +105,55 @@ import sounddevice as sd
 from faster_whisper.vad import VadOptions, get_speech_timestamps
 
 from app.asr.backends import ASRBackend, BACKEND_REGISTRY, RawSegment
+from app.retrieval import aliases_en, aliases_twi
 
 log = logging.getLogger(__name__)
 
-# A bare spoken number ("ten", "sixteen", "twenty seven") — self-contained
-# here rather than importing from app.retrieval.reference_extractor, which
-# has its own larger copy for full reference parsing. Kept deliberately
-# small: this only needs to recognize "this utterance IS a number," not
-# parse its value.
-_NUMBER_WORDS = {
-    "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
-    "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
-    "seventeen", "eighteen", "nineteen", "twenty", "thirty", "forty",
-    "fifty", "sixty", "seventy", "eighty", "ninety", "hundred","verse"
-}
+# A bare spoken number ("ten", "sixteen", "twenty seven", Twi's "dunsia",
+# "aduonu baako", ...) or a bare chapter/verse marker word ("verse",
+# Twi's "nkyekyɛmu"/"ti") — the classic "the speaker paused mid-
+# reference" case in ANY supported language (English: "Proverbs 31" ...
+# "10"; Twi: "Yohane ti mmiɛnsa" ... "nkyekyɛmu" ... "dunsia"), all
+# meaningful regardless of word count, so all exempted from the
+# min_words floor below (see _is_bare_number).
+#
+# Bug found by testing: this used to be a small, hardcoded, ENGLISH-ONLY
+# set, with a deliberate comment about NOT importing from
+# reference_extractor.py to keep this layer decoupled from Bible-
+# reference-parsing logic. That reasoning doesn't apply to importing
+# aliases_en.py/aliases_twi.py directly, though — those are pure
+# vocabulary data (no logic, no imports of their own, confirmed), not
+# reference-parsing code; importing them here doesn't create the
+# dependency the original comment was avoiding. Keeping the old
+# English-only set instead meant a bare Twi number or chapter/verse
+# marker word, spoken alone after a natural pause, was silently dropped
+# by min_words before it ever reached the Bible-matching pipeline at
+# all — the exact "continuous speech gets segmented mid-reference" case
+# this whole mechanism exists to handle, just unhandled for Twi. Built
+# from the same per-language alias modules reference_extractor.py and
+# version_detector.py already merge, so a third language (a new
+# aliases_<code>.py) extends this automatically — nothing here needs
+# touching again, same principle as app/asr/backends/registry.py's own
+# "add a backend, never touch transcriber.py" contract.
+_NUMBER_WORDS: set = set()
+for _lang in (aliases_en, aliases_twi):
+    # NUM_WORDS keys can be multi-word compounds now (Twi's "ɔha ne
+    # aduoson nsia" = 176, see aliases_twi.py) — this check tests one
+    # already-tokenized word at a time (_is_bare_number below), so each
+    # compound's individual tokens need registering too, not just the
+    # full phrase as one string (which could never equal a single word
+    # and would silently be dead weight in the set).
+    for _phrase in _lang.NUM_WORDS.keys():
+        _NUMBER_WORDS.update(_phrase.split())
+    # STRUCTURAL_WORDS keys are the "wrong"/spoken forms ("chapters",
+    # "vs", Twi's "nkyekyɛmu") and values are the canonical form each
+    # maps to ("chapter"/"verse") — the canonical forms themselves are
+    # NEVER keys, only values, so both sides need registering (the old
+    # hardcoded set's bare "verse" entry was exactly a values-side word;
+    # keys-only would have silently dropped it on this rewrite).
+    for _phrase in _lang.STRUCTURAL_WORDS.keys():
+        _NUMBER_WORDS.update(_phrase.split())
+    _NUMBER_WORDS.update(_lang.STRUCTURAL_WORDS.values())
 
 
 @dataclass

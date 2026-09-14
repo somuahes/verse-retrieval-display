@@ -37,6 +37,25 @@ set unchanged at 87.0%/0% false-positive, stress/generalization sets
 unchanged within noise of the pre-existing baseline) — see `PROGRESS.md`
 §26 for the full narrative.
 
+**Addendum, 2026-09-14** (Twi ASR reachability/tuning + a Twi
+semantic-search safety gate; still uncommitted on `main` at time of
+writing): the experimental `w2vbert` Twi backend is now actually
+reachable from the running app (previously it existed in code but
+`main_ui.py` had no language selector and `factory.py` defaulted Twi to
+the still-unimplemented Khaya placeholder), and got a real accuracy/speed
+pass (CPU-aware threading, decode serialization, silence trimming, CTC
+beam search + Twi-Bible-vocabulary lexicon correction, both new levers
+unvalidated against real audio). Twi number words extended from a
+hand-capped 1–10 to the full 1–176 range needed by any verse number,
+via programmatic compounding rules supplied by the user. A real,
+previously-working Twi safety gate — disabling semantic (paraphrase)
+search entirely while the TWI version is active, since the embedding
+model is English-only and was silently scoring Twi text as confident
+nonsense — was found missing (lost in an earlier revert) and re-added.
+See `PROGRESS.md` §27 for the full narrative, including one fix
+(a split-reference regression affecting bare "verse N" jumps) that
+hasn't yet been re-verified against the real `HybridEngine` end-to-end.
+
 ---
 
 ## 1. What the system is
@@ -157,21 +176,43 @@ hallucinated content** — every remaining error is an ordinary mishearing
 or a segmentation-boundary artifact. Measured against a real sermon
 transcript the operator supplied, after the three fixes above.
 
-**Twi ASR (new, experimental)**: `models/faster-whisper/akan-whisper` —
-[`GiftMark/akan-whisper-model`](https://huggingface.co/GiftMark/akan-whisper-model),
-a public `whisper-small` fine-tune for Akan/Twi, converted to CTranslate2
-int8 format. Drops into the exact same local-decode path as any other
-model (`Config(model_size="akan-whisper", backend="local")`) — zero code
-changes were needed. Must be invoked with `language="en"` (already the
-default) because the fine-tune repurposes Whisper's English language slot
-to mean "decode Twi" rather than adding a real Akan token — confirmed both
-by reading its `generation_config.json` and empirically (raw silence with
-VAD off produced Twi-script text, not English). **Transcription accuracy
-on real speech is NOT verified** — no published WER, no Twi audio
-available in this environment to test against; mechanically confirmed
-working (loads, runs, survives the GPU-unusable→CPU fallback cascade,
-correctly suppresses silence via the same VAD/confidence-gate stack) but
-genuinely unknown whether it's good enough for live use.
+**Twi ASR (experimental, and — as of 2026-09-14 — actually reachable from
+the app)**: `app/asr/backends/w2vbert.py`, a free offline fallback for
+when Khaya (the hosted API, still an unimplemented placeholder) is
+unavailable. `app/asr/factory.py`'s `create_transcriber("twi", ...)` now
+defaults to `backend="w2vbert"`, and `main_ui.py` gained a "Language:"
+selector (English / Twi) in the microphone card, independent of the
+Bible-version dropdown, so an operator can actually pick this at
+runtime — previously it existed in code but nothing in the UI could
+select it. Base model:
+[`ghananlpcommunity/w2v-bert-2.0_twi_alpha_v1`](https://huggingface.co/ghananlpcommunity/w2v-bert-2.0_twi_alpha_v1),
+converted to CTranslate2 int8. Measured at 73.6% WER on its original
+30-sentence test set — meaningfully worse than Khaya, not a recommended
+primary choice. Reworked 2026-09-14 for speed and accuracy: CPU-aware
+`intra_threads` (was hardcoded for one specific machine), decodes
+serialized against the dispatcher's own concurrency, leading/trailing
+silence trimmed before decode, greedy argmax replaced with CTC beam
+search (`pyctcdecode`, with an automatic greedy fallback), plus a
+post-decode correction pass against a Twi-Bible-word vocabulary
+(`rapidfuzz`, same technique validated elsewhere in this codebase for
+book-name fuzzy matching). **Neither the beam search nor the lexicon
+correction has been validated against real Twi audio** — no WER
+benchmark exists for either yet; both fail safe to the prior
+greedy/uncorrected behavior. **Transcription accuracy on real speech is
+otherwise still NOT verified** — no Twi audio available in this
+environment to test against; mechanically confirmed working (loads,
+runs, correctly suppresses silence via the same VAD/confidence-gate
+stack) but genuinely unknown whether it's good enough for live use. See
+`PROGRESS.md` §27 and `TRANSCRIPTION_SETUP.md` for the full detail,
+including the one-time online model fetch required before first use
+(the app runs fully offline afterward, `HF_HUB_OFFLINE=1`).
+
+A separate, now-unused Akan Whisper fine-tune
+([`GiftMark/akan-whisper-model`](https://huggingface.co/GiftMark/akan-whisper-model))
+was evaluated in an earlier session and is still present under
+`models/faster-whisper/akan-whisper` (drops into the local `faster-whisper`
+path via `Config(model_size="akan-whisper", backend="local")`) but is not
+what `factory.py` wires up for Twi by default — `w2vbert` above is.
 
 **Model path resolution**: `models/faster-whisper/<size>`, falling back to
 `models/<size>`. Locally available: `base.en` (active default), `akan-whisper`
@@ -231,6 +272,15 @@ model (unused, different engine).
     regardless of what's on screen.
   - `SEMANTIC_CONFIDENCE`/`SEMANTIC_CONFIDENCE_HI` and the rest of the
     matching/threshold logic are unchanged from the prior session.
+  - **New `_semantic_enabled()` gate, 2026-09-14**: disables semantic
+    (paraphrase) search entirely whenever the active version is TWI —
+    `semantic.py` has no language awareness and runs the same
+    English-only embedding model regardless of version, so a Twi query
+    was silently scoring confident-looking nonsense rather than erroring.
+    This existed once before but was lost in the `1c8bce2` revert; this
+    session re-added it. Direct-reference matching is unaffected — TWI
+    still works for anything with an actual spoken reference. See
+    `PROGRESS.md` §27.
 
 ### 3.3 Database — `app/database/`
 
@@ -312,7 +362,7 @@ not audio.
 | 1 | Capture & convert live audio to text | ✅ Met | Cloud-first (Groq) with automatic local fallback; 3.47% WER measured against real audio this session |
 | 2 | Apply semantic embedding for context understanding | ✅ Met | `all-MiniLM-L6-v2`, local, FAISS `IndexFlatIP` (English only — see Twi caveat below) |
 | 3 | Direct reference + semantic context matching | ✅ Met | Priority-ordered in `HybridEngine`, direct always wins |
-| 4 | Twi-to-English cross-lingual semantic mapping | ⚠️ Started, not complete | Twi Bible data, book names, structural words, and an experimental Twi ASR model all added and working this session (§3.1–3.3); Twi *semantic/topic* search still blocked on an English-only embedding model, deferred by operator choice; Twi ASR transcription quality unverified |
+| 4 | Twi-to-English cross-lingual semantic mapping | ⚠️ Started, not complete | Twi Bible data, book names, structural words (incl. full 1–176 number compounding as of 2026-09-14), and an experimental, now UI-reachable Twi ASR model (`w2vbert`) all added and working (§3.1–3.3); Twi *semantic/topic* search is explicitly disabled (not just lower-quality — see `_semantic_enabled()`, §3.2) pending an English-only embedding model swap, deferred by operator choice; Twi ASR transcription quality still unverified against real audio |
 | 5 | Three-state operational model | ✅ Met | `SessionState.state` — exactly 3 values, 1:1 with the objective |
 | 6 | Voice-controlled verse progression | ✅ Met (exceeded) | NEXT/PREV/LAST/REPEAT/STOP + verse-jump + ranges; two silent no-op bugs fixed this session so this actually works from the app's default state |
 | 7 | Multiple Bible versions (KJV, NIV, NLT) | ⚠️ Partial | KJV+BBE+**TWI** now have data; NIV/NLT recognized but blocked by licensing, not engineering |
@@ -326,17 +376,26 @@ Twi), 1 upgraded from "not started" to "in progress" this session.**
 
 ## 5. Known issues, ranked by what actually affects a live demo
 
-1. **Twi topic/paraphrase search doesn't yet match English's quality.**
-   Root cause identified precisely (English-only embedding model producing
-   noisy similarity scores on Twi text), fix scoped (multilingual model
-   swap + full reindex of all three versions), explicitly deferred by the
-   operator to a later session. Direct verse-reference lookup is
-   unaffected.
-2. **Twi ASR transcription quality is unverified.** The model mechanically
-   works (loads, runs, correctly suppresses silence) but there's no
-   published WER and no Twi audio available in this environment to test
-   real accuracy against. Needs the operator (or a Twi speaker) to test
-   with real speech before it's trustworthy for live use.
+1. **Twi topic/paraphrase search is now disabled outright, not just
+   lower-quality.** As of 2026-09-14, `hybrid.py._semantic_enabled()`
+   turns off semantic search entirely while TWI is active (see §3.2) —
+   deliberately, since the prior "search anyway, at lower quality" state
+   was silently returning confident-looking wrong answers, not just weak
+   ones. Root cause unchanged: English-only embedding model. Fix still
+   scoped the same way (multilingual model swap + full reindex of all
+   three versions), still deferred by the operator. Direct verse-reference
+   lookup is unaffected.
+2. **Twi ASR transcription quality is still unverified**, now against a
+   different (and, as of 2026-09-14, more actively tuned) model. The
+   default offline Twi backend is now `w2vbert` (73.6% WER on its own
+   small test set — see §3.1), reachable from the app's UI for the first
+   time this session, plus two new, also-unvalidated accuracy levers (CTC
+   beam search, Twi-Bible-vocabulary lexicon correction). Still no
+   published WER for the tuned pipeline and no Twi audio available in
+   this environment to test real accuracy against. Needs the operator (or
+   a Twi speaker) to test with real speech before any of this is
+   trustworthy for live use — the single most-repeated open item across
+   every Twi-ASR session so far.
 3. **Several Twi vocabulary entries are unverified drafts, clearly
    flagged in-code** — the Pentateuch book-naming convention, a handful
    of native-word OT book titles, and all Twi navigation-command phrases

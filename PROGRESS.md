@@ -1917,3 +1917,230 @@ right now" case with a much higher floor.
   expected result. Log excerpt for the announced-book case:
   `Book named with no resolvable verse yet — scoping semantic search to
   Ezekiel for the next 90s` → next utterance resolved to Ezekiel 1:16.
+
+---
+
+## 27. Twi ASR made reachable from the real app, w2v-bert accuracy/speed rework, Twi number compounding (1-176), and a Twi semantic-search safety gate
+
+Uncommitted working-tree session, 2026-09-14. Broad theme: Twi support
+had accumulated real capability across prior sessions (Bible data, book
+names, an experimental ASR model) but several pieces were still either
+unreachable from the running app or silently wrong. This session closes
+those gaps rather than adding new scope.
+
+### The Twi backend is now actually reachable from `main_ui.py`
+
+Previously `create_transcriber("twi", ...)` defaulted to `backend="khaya"`
+— a placeholder that raises `NotImplementedError` on load — and nothing
+in `main_ui.py` let an operator pick a transcription language at all
+(`ASRWorker` already accepted a `language` parameter, wired to
+`create_transcriber`, but every call site hardcoded none, so it was
+always `"en"`). Both fixed:
+
+- **`app/asr/factory.py`**: `_LANGUAGE_CONFIGS` (a dict of lambdas, one
+  fixed `Config` per language) replaced with `_LANGUAGE_DEFAULTS` (a
+  dict of plain override dicts, merged with — not layered on top of —
+  whatever the caller passes). `"twi"` now defaults to `backend="w2vbert"`,
+  the free offline model. `backend="khaya"` can still be requested
+  explicitly once that backend is filled in, to switch the default back.
+- **`app/ui/main_ui.py`**: new "Language:" combo box in the microphone
+  card (English / Twi (offline · w2v-bert)), independent of the Bible
+  version dropdown — an operator can transcribe Twi while displaying
+  KJV, or English while displaying TWI. Persisted via `QSettings`
+  (`asr_language`), locked in at Start-Listening time like the device
+  picker. `_start_asr()` now passes `language=language` into `ASRWorker`;
+  button/badge text reflects the loading Twi model (first run downloads
+  ~1.2GB) and "LISTENING · TWI" states.
+- **`TRANSCRIPTION_SETUP.md`**: corrected to match — the standalone-CLI
+  quick-start's own model auto-download doesn't happen when running
+  through the real app, because `semantic.py` sets `HF_HUB_OFFLINE=1`
+  process-wide; documented the one-time online `snapshot_download` +
+  `AutoProcessor.from_pretrained` command that has to be run first, and
+  the new Language selector's independence from the Bible-version
+  dropdown / `hybrid.py`'s `_allowed_languages()` vocabulary gate (two
+  genuinely separate concerns that share the word "Twi").
+
+### `app/asr/backends/w2vbert.py` — accuracy and speed rework (was previously a straight port, untuned)
+
+Four changes, all described in detail in the file's own module docstring:
+
+1. **`intra_threads` is now CPU-aware** (`os.cpu_count()`, clamped
+   4–16) instead of a hardcoded `16` tuned on one specific machine.
+2. **Decodes are serialized with an internal lock** — `transcriber.py`
+   dispatches up to 2 concurrent CPU-bound decodes, but this backend's
+   own thread pool was never sized with a second concurrent decode in
+   mind; two at once would each spin up their own pool and reproduce the
+   exact contention slowdown (8.9s/7.7s vs. 5.9s) the original
+   single-machine tuning measured.
+3. **Leading/trailing near-silence is trimmed before decode**
+   (energy-based, self-normalizing to the clip's own RMS) — CTC decode
+   time scales with frame count, so the endpoint margin `transcriber.py`
+   deliberately keeps around real speech is pure wasted decode time here.
+4. **Greedy argmax replaced with CTC beam search** (`pyctcdecode`,
+   beam width 10), with the original greedy path kept as an automatic
+   fallback wherever beam decode fails or the decoder can't be built
+   (e.g. if this checkpoint's tokenizer doesn't expose `get_vocab()` the
+   expected way) — deliberately defensive since this hasn't been tested
+   against a real downloaded checkpoint yet. No KenLM language model
+   (the natural next step) — `kenlm` has no prebuilt Windows wheel and a
+   from-source build was judged worse than a smaller, dependency-safe win.
+
+Plus a second, independent accuracy lever: **post-decode correction
+against a Twi Bible word vocabulary** built from `data/tw_asante.json`
+(the app's own shipped Twi Bible text) — same technique already
+validated in this codebase for book-name fuzzy matching (`rapidfuzz`,
+similarity floor, minimum length), extended to general decoded tokens on
+the reasoning that decode errors are usually near-miss spellings of a
+real word and Bible speech is this backend's actual target domain.
+
+**Neither lever (beam search or lexicon correction) has been validated
+against real Twi audio** — no WER benchmark exists for either yet. Both
+are wrapped defensively enough that a failure degrades to the
+already-working greedy/uncorrected path rather than crashing or
+producing worse output than before.
+
+**`requirements.txt`**: `pyctcdecode>=0.5.0` added (pulls in `numpy<2.0`
+as a dependency — confirmed this doesn't regress `accuracy_eval` on this
+project's venv). `rapidfuzz`'s comment updated to describe its current
+w2v-bert usage instead of the reference-extractor fuzzy-matching use it
+was originally added for (that usage was removed in an earlier revert,
+commit `1c8bce2`).
+
+### Twi number words: 1–10 only → full 1–176 compounding
+
+`app/retrieval/aliases_twi.py`'s `NUMBER_WORDS` previously stopped at 10
+— deliberately, per its own prior comment, because Twi's compounding
+rules for 11+ weren't known confidently enough to guess (a wrong number
+is a worse failure than a missing one). This session, the compounding
+rules were supplied directly by the user (cross-checked against Harvard's
+Twi counting materials) and implemented as three small tables (ones,
+teens, tens-words) generated into the full word list programmatically —
+teens ("dubaako" = 11), tens+ones ("aduonu baako" = 21), and
+hundred+remainder ("ɔha ne aduoson nsia" = 176, covering the full range
+this app ever needs — 176 is Psalm 119's length) — rather than
+hand-listing every value. Spelling variants are included generously and
+all normalize to the same integer, per the user's own sourcing guidance.
+
+Two new structural-word entries were also added from **live w2v-bert
+output**, not guessed: `"te"` → `"chapter"` (a one-vowel ASR misreading
+of `"ti"`, confirmed in real output as "romafoɔ te baako" for "Romans
+chapter 1") and four near-miss spellings of `"nkyekyɛmu"` ("verse") close
+enough (75–88% `rapidfuzz` similarity) to add as safe exact variants.
+Heavier garbling of the same word ("ntyityee," "nkyitkyee" — 33–56%
+similarity) was deliberately left uncorrected: no safe similarity
+threshold catches that tier without also colliding with unrelated short
+Twi words by chance (the same false-positive risk already documented
+elsewhere in this codebase for book-name fuzzy matching).
+
+**`app/retrieval/reference_extractor.py`**: `_text_normalise()` now
+pre-substitutes 3+-word compound number phrases (currently only Twi's
+"ɔha ne <remainder>" hundreds) to a literal digit string before any
+word-level tokenizing, sorted longest-phrase-first so a longer match
+("ɔha ne aduonu baako" = 121) is consumed before a shorter prefix of it
+("ɔha ne aduonu" = 120) could wrongly match part of it. 1–2 word entries
+are deliberately excluded from this pre-substitution — they already flow
+correctly through the existing tens+ones combiner, and substituting them
+independently here would break that combiner (see the code comment for
+the specific failure mode this avoids).
+
+**`app/retrieval/version_detector.py`**: gained its own copy of the
+chapter/verse structural-word normalization step (`_normalise_structural`,
+wired into `detect_range`/`detect_verse_jump` before number normalization)
+— found missing by testing: `reference_extractor.py` already normalizes
+Twi structural words, but `version_detector.py`'s verse-jump/range regexes
+independently hardcode the literal English word "verse," so a bare Twi
+verse-jump ("nkyekyɛmu dunsia") silently never matched anything even
+after the number-compounding fix above made the number itself parseable.
+
+**Verified this session** (re-run now, not just claimed): `py_compile`
+clean on every file touched; `reference_extractor.py`'s own 29-case
+self-test suite now passes **29/29** (previously 28/29 — the one
+pre-existing "verse thirty three" parsing bug flagged in §16 is no
+longer failing, though nothing in this session specifically targeted
+word-number parsing, so this may be incidental rather than a deliberate
+fix); ad-hoc checks against `extract_reference()` directly confirmed
+`"yohane ti mmiɛnsa nkyekyɛmu aduonu baako"` → `('John', 3, 21)` and
+`"...ɔha ne aduoson nsia"` → verse `176`, and `"romafoɔ te baako"` →
+`('Romans', 1, 1)` (the "te" → "chapter" fix). **Not verified**: any of
+this against real Twi speech audio — same standing gap as every prior
+Twi-ASR session, still blocked on there being no Twi audio available in
+this environment.
+
+### `hybrid.py`: a Twi semantic-search safety gate, and a split-reference regression fix
+
+**`_semantic_enabled()`** (new): returns `False` whenever the active
+Bible version is TWI. `semantic.py` has no language awareness at all — it
+runs the same English-only `all-MiniLM-L6-v2` model regardless of which
+version is active, and a `TWI.faiss` index loading successfully doesn't
+mean the embedding model understands Twi text; it just means a Twi
+semantic query silently returns confident-looking nonsense instead of
+erroring. **This was fixed once before** (documented as working) but the
+fix didn't survive the `1c8bce2` revert that removed it along with an
+unrelated bad merge — this session re-adds it, gating all three semantic
+call sites (`search_within_chapter`'s chapter-scoped guess, the bare
+book-mention scoped search, and the main `_run_semantic` path) plus the
+speculative-search kickoff. Direct-reference matching (an operator
+actually saying book/chapter/verse) is completely unaffected — it never
+touches the embedding model, so TWI still works for anything with a real
+reference; only the "no reference, guess from paraphrase" path is
+disabled for TWI, on the reasoning that disabled is more honest than
+silently wrong. The real fix, if Twi semantic search is ever wanted, is
+re-embedding the corpus with a genuinely multilingual model — out of
+scope here, same as previously documented.
+
+**Split-reference regression guard**: `process()` now checks
+`detect_verse_jump(text) is not None` before ever handing a short
+trailing utterance to `_extract_split_reference()` (§12/§14's
+cross-utterance recombination fallback). Bug found by testing: a bare
+"verse 10" said right after an ordinary, already-complete "Genesis
+chapter 1 verse 1" was being combined with the previous utterance into
+"Genesis 1:1 verse 10," which `extract_reference()` parses as the first
+complete pattern it finds (Genesis 1:1) — silently discarding the actual
+"verse 10" jump and re-displaying the old verse instead of jumping. Step
+4 (verse-jump against current tracked position) already handles a bare
+"verse N" correctly on its own; it never needed cross-utterance
+recombination in the first place. A genuine split reference like the
+original Leviticus 27 case ("...Leviticus" / "27") has no "verse" keyword
+in the second fragment, so `detect_verse_jump` still returns `None` there
+and this guard doesn't affect it.
+
+**Verified**: `py_compile` clean. **Not independently re-verified this
+session**: a live end-to-end run of the Genesis-1:1-then-verse-10 case
+against the real `HybridEngine` (the fix's logic was checked by reading
+and by the passing `reference_extractor` self-tests, not by a fresh
+ad-hoc script the way §12/§14's original fixes were) — worth a quick
+live check before relying on it under real speech.
+
+### Evaluation harness: run 5 times today, stable, unaffected by this session's changes
+
+`accuracy_eval` was re-run five times during the session (09:20–10:06,
+results in `app/evaluation/results/accuracy_20260914_*`). All five:
+**62.5% overall / 100.0% direct (n=10) / 76.9% semantic (n=13) / 0%
+false-positive (n=9) / 3 missed** (`semantic-9`, `semantic-10`,
+`semantic-13`, identical every run). This is **not a regression from
+today's changes** — `app/evaluation/pipeline.py` is a standalone replica
+that never imports or exercises `HybridEngine`, so none of today's Twi
+gating or split-reference guard could move this number either way; the
+identical 3-miss result across all 5 runs is a pre-existing gap in the
+standalone harness's semantic matching, not evidence about today's
+`hybrid.py`/`w2vbert.py` changes specifically. (The 32-case starter set
+and this 62.5% figure are also lower than the 100%/31-case figure
+recorded at the end of §18 — that reflects the test set having grown by
+one case in a prior, already-committed session, not anything from today;
+not investigated further here since it's outside today's scope.)
+Direct-reference timing varied a lot run to run (17ms → 270ms → 816ms)
+— plausibly cold-start/model-load variance on the machine during the
+session, not measured further.
+
+### Files touched this session (all still uncommitted at time of writing)
+
+`app/asr/backends/w2vbert.py`, `app/asr/factory.py`,
+`app/retrieval/aliases_twi.py`, `app/retrieval/hybrid.py`,
+`app/retrieval/reference_extractor.py`, `app/retrieval/version_detector.py`,
+`app/ui/main_ui.py`, `TRANSCRIPTION_SETUP.md`, `requirements.txt`.
+**Not touched**: `app/asr/transcriber.py` — its diff on disk (the
+`_NUMBER_WORDS` set rebuilt from `aliases_en`/`aliases_twi` instead of a
+hardcoded English-only list, so a bare Twi number/structural word spoken
+alone survives the `min_words` floor the same way an English one already
+did) predates this documentation pass and was left alone per standing
+instruction to never edit that file unassisted.

@@ -15,11 +15,13 @@ _LANGUAGES = (aliases_en, aliases_twi)
 VERSION_MAP: dict[str, str] = {}
 NAV_MAP: dict[str, str] = {}
 _NUM_WORDS: dict[str, int] = {}
+_STRUCTURAL_WORDS: dict[str, str] = {}
 
 for _lang in _LANGUAGES:
     VERSION_MAP.update(_lang.VERSION_PHRASES)
     NAV_MAP.update(_lang.NAV_PHRASES)
     _NUM_WORDS.update(_lang.NUM_WORDS)
+    _STRUCTURAL_WORDS.update(_lang.STRUCTURAL_WORDS)
 
 
 # ════════════════════════════════════════════════════════════
@@ -58,6 +60,28 @@ def nav_requires_confirm(text: str) -> bool:
         if re.search(rf"\b{re.escape(phrase)}\b", t):
             return phrase in PREV_CONFIRM_PHRASES
     return False
+
+
+def _normalise_structural(text: str) -> str:
+    """Replaces any language's chapter/verse marker word/phrase (Twi's
+    "nkyekyɛmu", English's "vs"/"v."/"verse no.", ...) with the literal
+    "chapter"/"verse" — same table and reasoning as
+    reference_extractor.py's _text_normalise (see aliases_en.py/
+    aliases_twi.py's STRUCTURAL_WORDS). Needed here too: _VERSE_JUMP_RE
+    and _RANGE_PATTERNS below both hardcode the literal English word
+    "verse" — without this, a bare Twi verse-jump ("nkyekyɛmu dunsia",
+    intending "verse 16") silently never matched anything, the same gap
+    that direct-reference matching used to have before _text_normalise
+    existed. Bug found by testing: numbers now compound correctly for
+    Twi (see aliases_twi.py) but a bare verse-jump utterance still
+    failed, because this file's own copy of the structural-word step was
+    simply missing, not because of anything number-related."""
+    t = text.lower()
+    for wrong, right in sorted(
+        _STRUCTURAL_WORDS.items(), key=lambda x: len(x[0]), reverse=True
+    ):
+        t = re.sub(rf"\b{re.escape(wrong)}(?!\w)", right, t)
+    return t
 
 
 def _normalise_numbers(text: str) -> str:
@@ -136,8 +160,11 @@ def detect_range(text: str) -> Optional[Tuple[int, int]]:
     if not text:
         return None
 
-    # Normalise word-form numbers first
-    t = _normalise_numbers(text)
+    # Normalise chapter/verse marker words (e.g. Twi's "nkyekyɛmu" ->
+    # "verse") before word-form numbers -- _RANGE_PATTERNS below
+    # hardcodes the literal English word "verse".
+    t = _normalise_structural(text)
+    t = _normalise_numbers(t)
 
     for pattern in _RANGE_PATTERNS:
         m = pattern.search(t)
@@ -223,8 +250,10 @@ def detect_verse_jump(text: str) -> Optional[int]:
     """
     if not text:
         return None
-    # Normalise word numbers first
-    t = _normalise_numbers(text)
+    # Normalise chapter/verse marker words, then word-form numbers --
+    # _VERSE_JUMP_RE below hardcodes the literal English word "verse".
+    t = _normalise_structural(text)
+    t = _normalise_numbers(t)
     # Skip if it looks like a range (avoid "verse 1 to 5" → jump 1)
     if detect_range(text):
         return None

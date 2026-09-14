@@ -22,12 +22,21 @@ requests>=2.31.0            # Khaya API calls (transcriber.py's backend="khaya",
 transformers>=4.30.0        # AutoProcessor for the same backend="w2vbert" path
                             # (also already required by sentence-transformers
                             # below, but now a direct dependency too).
-rapidfuzz>=3.0.0            # reference_extractor.py's fuzzy book-name/structural-
-                            # word fallback -- catches ASR garbling exact-match
-                            # lookup misses (e.g. "gyenisis" for "gyenesis"),
-                            # deliberately conservative on threshold (see
-                            # _fuzzy_lookup's docstring for the false-positive
-                            # investigation behind the exact numbers used).
+rapidfuzz>=3.0.0            # app/asr/backends/w2vbert.py's post-decode Twi Bible
+                            # vocabulary correction -- catches ASR garbling via
+                            # near-miss word matching, same conservative-threshold
+                            # technique (82% similarity floor, minimum candidate
+                            # length) originally validated in this codebase for
+                            # reference_extractor.py's book-name fuzzy matching
+                            # (since removed in a revert -- see w2vbert.py's
+                            # module docstring for the current usage).
+pyctcdecode>=0.5.0          # app/asr/backends/w2vbert.py's CTC beam-search decode
+                            # (replaces plain greedy argmax) -- pure Python, no
+                            # compiler needed. NOTE: pulls in numpy<2.0 as a
+                            # dependency, which downgrades numpy if a newer one
+                            # is already installed; re-run accuracy_eval after
+                            # installing this to confirm nothing else regressed
+                            # (verified clean on this project's own venv).
 
 # --- Audio I/O ---
 sounddevice>=0.4.6          # Cross-platform microphone input

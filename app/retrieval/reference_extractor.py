@@ -208,6 +208,35 @@ def _text_normalise(text: str, bundle: _LangBundle) -> str:
     for wrong, right in bundle.structural_words.items():
         text = re.sub(rf"\b{re.escape(wrong)}(?!\w)", right, text)
 
+    # Pre-substitute 3+-word compound number phrases (currently only
+    # Twi's "ɔha ne <remainder>" hundreds, e.g. "ɔha ne aduoson nsia" ->
+    # "176") to a literal digit string, before any word-level tokenizing
+    # happens below. _parse_number_at further down only ever looks at a
+    # 1- or 2-word window when combining number words (matching English's
+    # "twenty" + "three" tens+ones shape) — a 3-4 word phrase can never
+    # reach that combiner, so it has to already be a single digit token
+    # by the time anything downstream sees it. 1- and 2-word entries in
+    # bundle.number_words are deliberately EXCLUDED here and left as
+    # words — those already flow correctly through the existing
+    # tens+ones combiner (via SMALL_NUMBERS/TENS), and substituting them
+    # independently here would break it: "aduonu" (20) turning into "20"
+    # ahead of "baako" (1) would let _parse_number_at's own digit
+    # fast-path consume just the "20" and stop, never attempting to
+    # combine with the "baako" that was meant to follow it, making
+    # "aduonu baako" (21) resolve as 20. Sorted longest-first (by word
+    # count, not just string length) so "ɔha ne aduonu baako" (121)
+    # substitutes as one phrase before the "ɔha ne aduonu" (120) prefix
+    # a naive shorter-first pass would wrongly match part of it against.
+    _compound_numbers = [
+        (phrase, value)
+        for phrase, value in bundle.number_words.items()
+        if len(phrase.split()) >= 3
+    ]
+    for phrase, value in sorted(
+        _compound_numbers, key=lambda pv: len(pv[0].split()), reverse=True
+    ):
+        text = re.sub(rf"\b{re.escape(phrase)}\b", str(value), text)
+
     # Any period left at this point is not a decimal separator (the
     # digit.digit case above already consumed those) and not a known
     # abbreviation (the loop above already consumed those) — it's

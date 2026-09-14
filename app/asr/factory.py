@@ -2,33 +2,39 @@
 app/asr/factory.py
 ====================
 The English/Twi split: two call sites, zero shared backend code. Each
-language maps to its own Config -- extending either one only ever means
-touching that language's own backend file(s) in app/asr/backends/, never
-this function or transcriber.py.
+language maps to its own Config default -- extending either one only
+ever means touching that language's own backend file(s) in
+app/asr/backends/, never this function or transcriber.py.
 
-create_transcriber("twi", ...) raises a clear NotImplementedError today,
-the moment it's called -- BibleAITranscriber.__init__ loads its backend
-eagerly (same as it always has for every backend), and the Khaya backend
-(see app/asr/backends/khaya.py) is a placeholder that raises on load().
-A deliberate, informative stub rather than a silent hole or a confusing
-failure later at .start().
+create_transcriber("twi", ...) currently defaults to backend="w2vbert" --
+the free offline model, actively being tuned for speed/accuracy (see
+app/asr/backends/w2vbert.py). Khaya (see app/asr/backends/khaya.py) is
+still an unimplemented placeholder that raises on load(); pass
+backend="khaya" explicitly once it's filled in to go back to using it as
+the default again.
+
+config_overrides can include "backend" to pick a different one than the
+language's default (e.g. create_transcriber("twi", backend="khaya")) --
+_LANGUAGE_DEFAULTS is merged with, not layered as fixed kwargs on top of,
+whatever the caller passes, so this doesn't collide.
 """
 
 from app.asr.transcriber import BibleAITranscriber, Config
 
-_LANGUAGE_CONFIGS = {
-    "en": lambda overrides: Config(backend="auto", language="en", **overrides),
-    "twi": lambda overrides: Config(backend="khaya", language="tw", **overrides),
+_LANGUAGE_DEFAULTS = {
+    "en": {"backend": "auto", "language": "en"},
+    "twi": {"backend": "w2vbert", "language": "tw"},
 }
 
 
 def create_transcriber(language: str, **config_overrides) -> BibleAITranscriber:
     try:
-        build_config = _LANGUAGE_CONFIGS[language]
+        defaults = _LANGUAGE_DEFAULTS[language]
     except KeyError:
         raise ValueError(
             f"Unsupported language {language!r} -- expected one of "
-            f"{sorted(_LANGUAGE_CONFIGS)}"
+            f"{sorted(_LANGUAGE_DEFAULTS)}"
         )
 
-    return BibleAITranscriber(build_config(config_overrides))
+    merged = {**defaults, **config_overrides}
+    return BibleAITranscriber(Config(**merged))

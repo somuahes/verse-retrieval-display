@@ -1419,6 +1419,28 @@ class OperatorWindow(QMainWindow):
         row1.addWidget(refresh)
         lay.addLayout(row1)
 
+        # Independent of which Bible version is on screen -- you can
+        # speak Twi while displaying KJV, or English while displaying
+        # TWI, etc. This only controls which ASR backend transcribes the
+        # microphone; hybrid.py's own Twi-vocabulary gating (which Bible
+        # version is active) is a separate, unrelated concern.
+        row2 = QHBoxLayout()
+        row2.setSpacing(6)
+        row2.addWidget(lbl("Language:", 11, "text_d"))
+        self._lang_combo = QComboBox()
+        self._lang_combo.setStyleSheet(combo_qss())
+        self._lang_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._lang_combo.addItem("English", userData="en")
+        self._lang_combo.addItem("Twi (offline · w2v-bert)", userData="twi")
+        saved_lang = self._settings.value("asr_language", "en")
+        idx = self._lang_combo.findData(saved_lang)
+        self._lang_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._lang_combo.currentIndexChanged.connect(
+            lambda: self._settings.setValue(
+                "asr_language", self._lang_combo.currentData()))
+        row2.addWidget(self._lang_combo, stretch=1)
+        lay.addLayout(row2)
+
         row3 = QHBoxLayout()
         row3.setSpacing(8)
         self._btn_listen = QPushButton("▶  Start Listening")
@@ -1735,20 +1757,34 @@ class OperatorWindow(QMainWindow):
             self._start_asr()
 
     def _start_asr(self):
+        # Language is chosen independently from whichever Bible version
+        # is on screen — the "Language:" selector next to the device
+        # picker (self._lang_combo), not the version dropdown. Locked in
+        # at Start-Listening time, same as the device picker itself;
+        # switching it mid-session picks up on the next Start Listening,
+        # not immediately.
+        language = self._lang_combo.currentData() or "en"
+        is_twi = language == "twi"
+
         self._asr = ASRWorker(
             device_index=self._selected_device(),
             engine=self._engine,
+            language=language,
             parent=self)
         self._asr.transcript_signal.connect(self._on_transcript)
         self._asr.status_signal.connect(self._on_asr_status)
         self._asr.start()
         self._listening = True
         self._dev_combo.setEnabled(False)
+        self._lang_combo.setEnabled(False)
         self._btn_listen.setEnabled(False)
-        self._btn_listen.setText("Loading model…")
+        self._btn_listen.setText(
+            "Loading Twi model…" if is_twi else "Loading model…")
         self._btn_listen.setStyleSheet(btn_qss())
         self._btn_stop.setEnabled(True)
-        self._loading_lbl.setText("loading…")
+        self._loading_lbl.setText(
+            "loading offline Twi ASR (first run downloads ~1.2GB)…"
+            if is_twi else "loading…")
         self._set_badge("LOADING", "amber", "amber_d")
 
     def _stop_asr(self):
@@ -1757,6 +1793,7 @@ class OperatorWindow(QMainWindow):
             self._asr = None
         self._listening = False
         self._dev_combo.setEnabled(True)
+        self._lang_combo.setEnabled(True)
         self._btn_listen.setEnabled(True)
         self._btn_listen.setText("▶  Start Listening")
         self._btn_listen.setStyleSheet(btn_qss("primary"))
@@ -1766,11 +1803,15 @@ class OperatorWindow(QMainWindow):
 
     def _on_asr_status(self, status):
         if status == "listening":
+            is_twi = bool(self._asr and self._asr.language == "twi")
             self._loading_lbl.setText("")
             self._btn_listen.setEnabled(True)
-            self._btn_listen.setText("● Listening")
+            self._btn_listen.setText(
+                "● Listening (Twi · offline)" if is_twi else "● Listening")
             self._btn_listen.setStyleSheet(btn_qss())
-            self._set_badge("LISTENING", "green", "green_d")
+            self._set_badge(
+                "LISTENING · TWI" if is_twi else "LISTENING",
+                "green", "green_d")
         elif status == "loading":
             self._set_badge("LOADING", "amber", "amber_d")
         elif status == "stopped":
@@ -1780,6 +1821,7 @@ class OperatorWindow(QMainWindow):
             self._set_badge("ERROR", "red", "red_d")
             self._listening = False
             self._dev_combo.setEnabled(True)
+            self._lang_combo.setEnabled(True)
             self._btn_listen.setEnabled(True)
             self._btn_listen.setText("▶  Start Listening")
             self._btn_listen.setStyleSheet(btn_qss("primary"))

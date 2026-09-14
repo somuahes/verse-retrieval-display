@@ -13,9 +13,9 @@ proper noun ("John" -> "Yohane") versus a constructed compositional phrase
 ("next verse" -> ?) versus a numeral. Nothing in this file has been checked
 by a native Twi speaker or against a real Ghana Bible Society edition — it
 is a starting draft, not a verified translation, EXCEPT where a section
-says otherwise (STRUCTURAL_WORDS below was given directly by the user, not
-guessed). See each section's own note for where I'd push back hardest on
-trusting it as-is.
+says otherwise (STRUCTURAL_WORDS, and NUMBER_WORDS' 11-176 compounding
+rules, were both given directly by the user, not guessed). See each
+section's own note for where I'd push back hardest on trusting it as-is.
 """
 
 LANGUAGE = "twi"
@@ -162,44 +162,154 @@ BOOK_ALIASES: dict[str, str] = {
 }
 
 # ============================================================
-# NUMBER WORDS — cardinals 1-10 ONLY.
+# NUMBER WORDS — cardinals 1-176 (the full range this app ever needs:
+# verse numbers cap at 176, Psalm 119's length — see
+# reference_extractor.py's _valid_reference).
 #
-# VERIFY, moderate confidence: these are basic, everyday Twi vocabulary
-# (much more foundational than the obscure OT book titles above), so I'd
-# push back less hard on trusting these than the VERIFY book block. Still
-# unverified against a real reference — check spelling/diacritics.
+# 1-10 are VERIFY, moderate confidence, as before. 11-176 were given
+# directly by the user (cross-checked against Harvard's Twi counting
+# materials and a Twi numbering lesson, cited in conversation), following
+# the same "given directly by the user, not guessed" trust level as
+# STRUCTURAL_WORDS below — this project's policy throughout this file has
+# been that a wrong number is a worse failure than a missing one, so 11+
+# stayed unimplemented until someone who actually knows the compounding
+# rules supplied them, rather than being guessed.
 #
-# Deliberately NOT attempting 11+. English's "twenty" + "seven" = 27
-# combinable pattern (see SMALL_NUMBERS/TENS below) doesn't just
-# transliterate to Twi — Twi's counting system for larger numbers has its
-# own, more involved compounding rules I don't have reliable enough
-# knowledge of to construct correctly. Getting a number WRONG is a
-# different, worse kind of failure than an awkward nav phrase (it's
-# silently incorrect data, not just unnatural-sounding), so this is
-# capped at what I'm actually confident about rather than guessed further.
-# A native speaker filling in 11+ here is the natural way to extend this.
+# Twi's compounding is regular, not a flat list to hand-maintain:
+#   11-19: "du" ("ten") + a reduced ones-word            -> dubaako (11)
+#   20,30,...90: their own tens-words                     -> aduonu (20)
+#   21-99 (not a multiple of 10): tens-word + ones-word    -> aduonu baako (21)
+#   100: "ɔha"
+#   101-176: "ɔha ne" ("hundred and") + the 1-99 remainder -> ɔha ne aduoson nsia (176)
+# so this is generated below from three small tables, the same way the
+# user's own reference implementation was structured, rather than
+# hand-listing every value. Spelling variants (e.g. "mmienu"/"mienu",
+# "aduoson"/"aduɔson") are included generously and all normalize to the
+# same integer — same reasoning as this file's existing ASCII-fallback
+# pattern (e.g. "nwɔtwe"/"nwotwe" below), and explicitly recommended by
+# the user's own sourcing ("I would normalize those rather than treat
+# them as different numbers").
 # ============================================================
-NUMBER_WORDS: dict[str, int] = {
-    "baako": 1,
-    "mmienu": 2,
-    "mmiɛnsa": 3, "mmiensa": 3,
-    "nnan": 4,
-    "enum": 5, "anum": 5,
-    "nsia": 6,
-    "nson": 7,
-    "nwɔtwe": 8, "nwotwe": 8,
-    "nkron": 9,
-    "edu": 10,
+
+# Ones-words as used standalone (1-9) AND as the trailing part of a
+# tens/hundred compound ("aduonu baako" = 21, "ɔha ne baako" = 101) --
+# Twi reportedly reduces some of these in the 11-19 "du+" position
+# specifically (see _TEEN_ONES below), so this table is NOT reused there.
+_ONES: dict[int, list] = {
+    1: ["baako"],
+    2: ["mmienu", "mienu"],
+    3: ["mmiɛnsa", "mmiensa", "miɛnsa", "miensa"],
+    4: ["nnan", "nan"],
+    5: ["enum", "anum", "num"],
+    6: ["nsia"],
+    7: ["nson"],
+    8: ["nwɔtwe", "nwotwe"],
+    9: ["nkron"],
 }
 
-# No compound-number support yet for Twi (see note above) — nothing to
-# combine, so these stay empty rather than guessed.
-SMALL_NUMBERS: set = set()
-TENS: set = set()
+# The 11-19 "du+" forms don't all reduce the same way an ones-word would
+# on its own (e.g. 12 is "dumienu", not "du" + the bare "mmienu"/"mienu"
+# above) -- given as complete words per the user's sourced table, same as
+# how English's "eleven".."nineteen" are complete NUMBER_WORDS entries
+# below rather than "ten"+"one" compounds.
+_TEENS: dict[int, list] = {
+    11: ["dubaako"],
+    12: ["dumienu", "dummienu"],
+    13: ["dumiɛnsa", "dummiɛnsa", "dumiensa", "dummiensa"],
+    14: ["dunan", "dunnan"],
+    15: ["dunum", "dunnum"],
+    16: ["dunsia"],
+    17: ["dunson"],
+    18: ["dunwɔtwe", "dunwotwe"],
+    19: ["dunkron"],
+}
 
-# Same 1-10 cardinals, in the compound-literal shape version_detector.py's
-# range detection expects (identical to NUMBER_WORDS above until compounds
-# are ever added).
+_TENS_WORDS: dict[int, list] = {
+    20: ["aduonu"],
+    30: ["aduasa"],
+    40: ["aduanan"],
+    50: ["aduonum"],
+    60: ["aduosia"],
+    70: ["aduoson", "aduɔson"],
+    80: ["aduowɔtwe", "aduɔwɔtwe"],
+    90: ["aduokron", "aduɔkron"],
+}
+
+# "hundred and" -- joins "ɔha" (100) to a 1-99 remainder ("ɔha ne
+# aduoson nsia" = 176). Single spelling given; not a place to guess a
+# variant that wasn't sourced.
+_HUNDRED_CONNECTOR = "ne"
+
+
+def _build_twi_numbers() -> dict[str, int]:
+    words: dict[str, int] = {
+        "baako": 1, "mmienu": 2, "mmiɛnsa": 3, "mmiensa": 3,
+        "nnan": 4, "enum": 5, "anum": 5, "nsia": 6, "nson": 7,
+        "nwɔtwe": 8, "nwotwe": 8, "nkron": 9,
+        "edu": 10, "du": 10,
+        "ɔha": 100,
+    }
+
+    # 1-9 in every compound-context spelling too (SMALL_NUMBERS below
+    # needs the full variant set, not just the one canonical spelling
+    # each already got above).
+    ones_phrases: dict[int, list] = {n: list(v) for n, v in _ONES.items()}
+
+    for n, variants in _TEENS.items():
+        for v in variants:
+            words[v] = n
+
+    tens_phrases: dict[int, list] = {}
+    for tens_val, tens_variants in _TENS_WORDS.items():
+        tens_phrases[tens_val] = list(tens_variants)
+        for tv in tens_variants:
+            words[tv] = tens_val
+            for ones_val, ones_variants in ones_phrases.items():
+                for ov in ones_variants:
+                    words[f"{tv} {ov}"] = tens_val + ones_val
+
+    # 1-99 phrases eligible to follow "ɔha ne" -- every spelling of every
+    # value from 1 to 99 that's now recognized above (ones, ten itself,
+    # teens, and tens/tens+ones compounds). "10" is neither in
+    # ones_phrases (1-9 only) nor _TEENS (11-19 only) -- without adding
+    # it here explicitly, "ɔha ne du"/"ɔha ne edu" (110) would silently
+    # never get generated (caught by testing every table entry directly,
+    # not just a handful of end-to-end phrases -- a 3-line gap that
+    # produced no error, just a quietly missing value).
+    remainder_phrases: dict[int, list] = {n: list(v) for n, v in ones_phrases.items()}
+    remainder_phrases[10] = ["edu", "du"]
+    for n, variants in _TEENS.items():
+        remainder_phrases.setdefault(n, []).extend(variants)
+    for tens_val, variants in tens_phrases.items():
+        remainder_phrases.setdefault(tens_val, []).extend(variants)
+        for ones_val, ones_variants in ones_phrases.items():
+            combo_val = tens_val + ones_val
+            for tv in variants:
+                for ov in ones_variants:
+                    remainder_phrases.setdefault(combo_val, []).append(f"{tv} {ov}")
+
+    for remainder_val, variants in remainder_phrases.items():
+        if not (1 <= remainder_val <= 99):
+            continue
+        total = 100 + remainder_val
+        for v in variants:
+            words[f"ɔha {_HUNDRED_CONNECTOR} {v}"] = total
+
+    return words
+
+
+NUMBER_WORDS: dict[str, int] = _build_twi_numbers()
+
+# Same word sets English's aliases_en.py uses to let
+# reference_extractor.py's _parse_number_at/_number_from_words combine a
+# tens-word with a ones-word at runtime (e.g. "aduonu baako" -> 21) --
+# populated from the same words already given their own NUMBER_WORDS
+# entries above, not a separate guess.
+SMALL_NUMBERS: set = {v for variants in _ONES.values() for v in variants}
+TENS: set = {v for variants in _TENS_WORDS.values() for v in variants}
+
+# Same cardinals, in the compound-literal shape version_detector.py's
+# range detection expects (identical to NUMBER_WORDS above).
 NUM_WORDS: dict[str, int] = dict(NUMBER_WORDS)
 
 # ============================================================
@@ -235,6 +345,32 @@ STRUCTURAL_WORDS: dict[str, str] = {
     # word that gets skipped past -- unlike a number word, it can't turn
     # into a wrong chapter/verse digit on its own.
     "t": "chapter",
+    # "te" -- confirmed live from w2v-bert output ("romafoɔ te baako",
+    # intending "romafoɔ ti baako" = "Romans chapter 1"): a one-vowel
+    # ASR misreading of "ti". Same low-risk reasoning as "t" above -- a
+    # wrong substitution only ever injects a harmless extra "chapter"
+    # filler, never fabricates a wrong number on its own.
+    "te": "chapter",
+    # Near-miss spellings of "nkyekyɛmu" confirmed live from w2v-bert
+    # output, close enough (75-88% character similarity, checked against
+    # rapidfuzz.fuzz.ratio) that adding them as exact variants is safe --
+    # same reasoning as "nkyekyɛ mu"/"nkyekye mu" above, just without the
+    # space. NOT a general fuzzy-match fix: real w2v-bert output on this
+    # word also included FAR heavier garbling ("ntyityee", "nkyitkyee",
+    # "ntwityere" -- 33-56% similarity) that no safe similarity threshold
+    # can catch without also matching unrelated short Twi words by
+    # chance (the same false-positive risk already documented for
+    # book-name fuzzy matching elsewhere in this codebase, where
+    # "father"/"esther" collided at 67%). That heavier tier is a real
+    # ASR-accuracy ceiling for this specific word on this specific
+    # model, not something a reference-parsing fix can safely close --
+    # see app/asr/backends/w2vbert.py and TRANSCRIPTION_SETUP.md for the
+    # actual levers (Khaya's hosted API measured far more accurate;
+    # fine-tuning is the other one, blocked on real training audio).
+    "nkyekyɛ": "verse",
+    "nkyekye": "verse",
+    "nkyikyemu": "verse",
+    "kyekyɛɛ": "verse",
 }
 
 # See aliases_en.py's BARE_MENTION_BLOCKLIST — no current Twi

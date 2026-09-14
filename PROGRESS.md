@@ -2115,24 +2115,29 @@ live check before relying on it under real speech.
 
 `accuracy_eval` was re-run five times during the session (09:20–10:06,
 results in `app/evaluation/results/accuracy_20260914_*`). All five:
-**62.5% overall / 100.0% direct (n=10) / 76.9% semantic (n=13) / 0%
-false-positive (n=9) / 3 missed** (`semantic-9`, `semantic-10`,
-`semantic-13`, identical every run). This is **not a regression from
+**87.0% exact-match (direct+semantic) / 100.0% direct (n=10) / 76.9%
+semantic (n=13) / 0% false-positive (n=9) / 3 missed** (`semantic-9`,
+`semantic-10`, `semantic-13`, identical every run) — matching the
+already-documented 08-28 baseline exactly (see `SYSTEM_DOCUMENTATION.md`'s
+2026-08-28 addendum). *(Correction: an earlier version of this section
+mis-stated this as "62.5% overall," dividing correct-count by all 32
+cases including the 9 `no_match_expected` ones — the harness's own
+"exact-match accuracy" metric (`accuracy_eval.py`'s `acc(matchable)`)
+correctly excludes those from its denominator, since a no-match case
+isn't a match to be graded right/wrong, only a false-positive check.
+87.0% is the right number; caught and fixed by re-running the harness
+fresh and reading its own math.)* This is **not a regression from
 today's changes** — `app/evaluation/pipeline.py` is a standalone replica
 that never imports or exercises `HybridEngine`, so none of today's Twi
 gating or split-reference guard could move this number either way; the
-identical 3-miss result across all 5 runs is a pre-existing gap in the
+identical 3-miss result across all runs is a pre-existing gap in the
 standalone harness's semantic matching, not evidence about today's
-`hybrid.py`/`w2vbert.py` changes specifically. (The 32-case starter set
-and this 62.5% figure are also lower than the 100%/31-case figure
-recorded at the end of §18 — that reflects the test set having grown by
-one case in a prior, already-committed session, not anything from today;
-not investigated further here since it's outside today's scope.)
+`hybrid.py`/`w2vbert.py` changes specifically.
 Direct-reference timing varied a lot run to run (17ms → 270ms → 816ms)
 — plausibly cold-start/model-load variance on the machine during the
 session, not measured further.
 
-### Files touched this session (all still uncommitted at time of writing)
+### Files touched this session
 
 `app/asr/backends/w2vbert.py`, `app/asr/factory.py`,
 `app/retrieval/aliases_twi.py`, `app/retrieval/hybrid.py`,
@@ -2144,3 +2149,96 @@ hardcoded English-only list, so a bare Twi number/structural word spoken
 alone survives the `min_words` floor the same way an English one already
 did) predates this documentation pass and was left alone per standing
 instruction to never edit that file unassisted.
+
+Committed and pushed as `fe115cd` on `main`. §28 covers a follow-up
+testing pass on top of this commit.
+
+---
+
+## 28. Closing the "not verified" gaps from §27: a permanent regression test file, and a correction to §27's own accuracy figure
+
+Follow-up request: "test the system with more test cases." §27 had
+flagged two specific items as not independently re-verified against the
+real `HybridEngine` — the split-reference verse-jump guard, and the Twi
+number-compounding/structural-word fixes beyond a bare `extract_reference()`
+call. Both closed this pass, plus one self-caught error in §27's own
+write-up.
+
+### New permanent test file: `tests/test_twi_and_splitref_fixes.py`
+
+10 cases, same convention as the rest of `tests/` (real `HybridEngine`,
+real `bible.db`, real FAISS indexes, no mocks) — not thrown away as a
+scratch script, since these are exactly the regressions a future session
+could silently reintroduce:
+
+- `test_verse_jump_after_complete_reference_is_not_recombined` — the
+  Genesis-1:1-then-"verse 10" case from §27, run live for the first time
+  (previously only checked by reading the code + the passing
+  `reference_extractor` self-tests). **Passes.**
+- `test_genuine_split_reference_still_recombines` /
+  `test_bare_verse_number_split_reference_still_works` — the original
+  Leviticus-27 and Proverbs-31/10 split-reference cases from §12/§14,
+  re-run to confirm the new guard doesn't collateral-damage them. Both
+  **pass**, unchanged.
+- `test_twi_semantic_search_is_disabled` / `test_kjv_semantic_search_still_enabled`
+  — confirms `_semantic_enabled()` actually blocks a Twi paraphrase from
+  moving the session position end-to-end (§27 only unit-checked the
+  method's return value directly, not a live `process()` call), and that
+  KJV is unaffected. Both **pass**.
+- `test_twi_tens_ones_compound_number` (aduonu baako → John 3:21) and
+  `test_twi_hundred_compound_number` (ɔha ne aduoson nsia → verse 176,
+  tested against Psalms 119 — the one chapter that actually has 176
+  verses) — both **pass**. The hundred-compound case exposed a mistake
+  in my first ad-hoc check this pass: I originally tested it against
+  John 3, which has no verse 176, so the engine correctly found nothing
+  — that's the DB lookup working as designed, not a bug in the number
+  compounding. Re-pointed at Psalms 119 (176 verses, the exact figure
+  `aliases_twi.py`'s own comment cites) to test the real thing.
+- `test_twi_bare_verse_jump_uses_structural_word_normalisation` — the
+  "nkyekyɛmu dunsia" case from §27, now run through the whole engine
+  (chapter-only ref, then a bare jump) instead of just
+  `extract_reference()` directly. **Passes.**
+- `test_twi_near_miss_structural_word_te_means_chapter` — "romafoɔ te
+  baako" → Romans 1:1. **Passes.**
+- `test_kjv_direct_reference_still_works` — cheap baseline sanity check,
+  kept for free.
+
+**Full suite**: `pytest tests/` — **52/52 passed** (42 pre-existing +
+these 10), confirming none of today's changes broke the existing Queue/
+History/Browse/DB-helper integration tests either.
+
+### Correction to §27: the "62.5%" accuracy figure was a math error, not a finding
+
+Re-running `accuracy_eval` fresh this pass (`accuracy_20260914_114022`)
+produced **87.0%** exact-match accuracy, not the 62.5% §27 originally
+reported from the same five same-numbered result files. The harness's
+own headline metric (`accuracy_eval.py`'s `acc(matchable)`) divides
+correct-count only by the 23 `direct`+`semantic` cases — it deliberately
+excludes the 9 `no_match_expected` cases from that denominator, since a
+correctly-empty no-match case isn't a "match" to grade right or wrong,
+only a separate false-positive check. §27 divided by all 32 cases
+instead, which was simply wrong arithmetic, not a real 62.5%. Corrected
+directly in §27 above rather than left standing. The underlying
+finding — stable, identical results across all 5 runs, 3 pre-existing
+semantic misses unrelated to today's `HybridEngine` changes — was
+already correct and unaffected by the fix; only the one headline number
+was wrong. **87.0%/100.0%/76.9%/0% matches the 2026-08-28 baseline in
+`SYSTEM_DOCUMENTATION.md` exactly** — confirms no regression from
+today's session, this time on the right number.
+
+### Still not verified (unchanged from §27, flagged again rather than re-claimed)
+
+- Real Twi speech audio — every check this pass and last was typed text
+  through `process()`, not real recordings. Still blocked on there being
+  no Twi audio in this environment.
+- `w2vbert.py`'s CTC beam search and lexicon-correction levers — still
+  untested against the real downloaded checkpoint.
+- The formal `accuracy_eval`/`starter_testset.csv` harness still has zero
+  Twi cases and no `version`/language column in its schema
+  (`dataset_schema.py`) to add any — today's Twi verification lives
+  entirely in the new pytest file above, which drives the real
+  `HybridEngine` directly and doesn't need that harness's plumbing.
+  Extending `pipeline.py`/`dataset_schema.py` to support a per-case
+  version would be the way to fold Twi cases into the formal harness
+  later, if that harness's CSV-driven format (vs. this session's
+  pytest-file approach) is ever specifically wanted.

@@ -1,8 +1,8 @@
 """
 End-to-end integration tests for the Operator Panel (app/ui/main_ui.py)
-against the real HybridEngine and the real bible.db — covers the Queue,
-Session History, Save-Slide-as-Image, and Browser-panel wiring added on
-top of the existing app. Builds one real OperatorWindow (offscreen, via
+against the real HybridEngine and the real bible.db — covers Session
+History, Save-Slide-as-Image, and Browser-panel wiring added on top of
+the existing app. Builds one real OperatorWindow (offscreen, via
 conftest.py's QT_QPA_PLATFORM setting) and drives it the way a click
 would, without needing an actual display.
 """
@@ -21,10 +21,6 @@ SAMPLE_VERSE_2 = {
     "book": "Genesis", "chapter": 1, "verse": 1, "version": "KJV",
     "text": "In the beginning God created the heaven and the earth.",
 }
-SAMPLE_VERSE_3 = {
-    "book": "Psalms", "chapter": 23, "verse": 1, "version": "KJV",
-    "text": "The LORD is my shepherd; I shall not want.",
-}
 
 
 @pytest.fixture(scope="module")
@@ -37,87 +33,11 @@ def operator_window(qapp):
 
 @pytest.fixture(autouse=True)
 def _clean_state(operator_window):
-    """Every test starts from an empty Queue/History, regardless of
-    execution order — the window itself is built once per module for
-    speed (loading the real engine + semantic index isn't free)."""
-    operator_window._clear_queue()
+    """Every test starts from an empty History, regardless of execution
+    order — the window itself is built once per module for speed
+    (loading the real engine + semantic index isn't free)."""
     operator_window._history.clear()
     yield
-
-
-# ── Queue ───────────────────────────────────────────────────
-
-def test_queue_starts_empty_with_hint_visible(operator_window):
-    assert operator_window._queue == []
-    assert not operator_window._queue_empty_hint.isHidden()
-
-
-def test_add_to_queue_hides_hint_and_updates_count(operator_window):
-    operator_window._add_to_queue(SAMPLE_VERSE)
-    assert operator_window._queue == [SAMPLE_VERSE]
-    assert operator_window._queue_empty_hint.isHidden()
-    assert operator_window._queue_count_lbl.text() == "1 staged"
-
-
-def test_move_queue_item_reorders_the_underlying_list(operator_window):
-    for v in (SAMPLE_VERSE, SAMPLE_VERSE_2, SAMPLE_VERSE_3):
-        operator_window._add_to_queue(v)
-
-    last_widget = operator_window._queue_layout.itemAt(
-        operator_window._queue_layout.count() - 2
-    ).widget()
-    operator_window._move_queue_item(last_widget, -1)
-
-    assert operator_window._queue == [SAMPLE_VERSE, SAMPLE_VERSE_3, SAMPLE_VERSE_2]
-
-
-def test_move_queue_item_at_top_is_a_no_op(operator_window):
-    operator_window._add_to_queue(SAMPLE_VERSE)
-    operator_window._add_to_queue(SAMPLE_VERSE_2)
-    first_widget = operator_window._queue_layout.itemAt(1).widget()
-    operator_window._move_queue_item(first_widget, -1)
-    assert operator_window._queue == [SAMPLE_VERSE, SAMPLE_VERSE_2]
-
-
-def test_remove_queue_item_updates_list_and_widget_together(operator_window):
-    operator_window._add_to_queue(SAMPLE_VERSE)
-    operator_window._add_to_queue(SAMPLE_VERSE_2)
-    widget_to_remove = operator_window._queue_layout.itemAt(1).widget()
-    operator_window._remove_queue_item(widget_to_remove)
-    assert operator_window._queue == [SAMPLE_VERSE_2]
-
-
-def test_clear_queue_shows_hint_again(operator_window):
-    operator_window._add_to_queue(SAMPLE_VERSE)
-    operator_window._clear_queue()
-    assert operator_window._queue == []
-    assert not operator_window._queue_empty_hint.isHidden()
-
-
-def test_queue_save_load_round_trip_through_the_real_dialog_path(operator_window, tmp_path, monkeypatch):
-    from PyQt5.QtWidgets import QFileDialog
-
-    operator_window._add_to_queue(SAMPLE_VERSE)
-    operator_window._add_to_queue(SAMPLE_VERSE_2)
-
-    save_path = str(tmp_path / "program.json")
-    monkeypatch.setattr(
-        QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (save_path, "")))
-    operator_window._save_queue()
-
-    operator_window._clear_queue()
-    assert operator_window._queue == []
-
-    monkeypatch.setattr(
-        QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: (save_path, "")))
-    operator_window._load_queue()
-
-    assert operator_window._queue == [
-        {"book": "John", "chapter": 3, "verse": 16, "version": "KJV",
-         "text": "For God so loved the world..."},
-        {"book": "Genesis", "chapter": 1, "verse": 1, "version": "KJV",
-         "text": "In the beginning God created the heaven and the earth."},
-    ]
 
 
 # ── History ─────────────────────────────────────────────────
@@ -234,26 +154,6 @@ def test_browser_send_preview_reaches_operator_preview_state(operator_window):
     assert operator_window._last_preview_verse is not None
     assert operator_window._last_preview_verse["book"] == "Genesis"
     assert operator_window._last_preview_verse["verse"] == 1
-
-
-def test_browser_add_queue_reaches_operator_queue(operator_window):
-    operator_window._toggle_browse()
-    bw = operator_window._browse_panel
-
-    from PyQt5.QtCore import Qt
-    genesis = bw._books_list.findItems("Genesis", Qt.MatchExactly)[0]
-    bw._on_book_selected(genesis)
-    bw._on_chapter_selected(1)
-
-    row = next(
-        bw._verses_layout.itemAt(i).widget()
-        for i in range(bw._verses_layout.count())
-        if isinstance(bw._verses_layout.itemAt(i).widget(), BrowserVerseRow)
-    )
-    row.add_queue.emit(row._verse)
-
-    assert len(operator_window._queue) == 1
-    assert operator_window._queue[0]["book"] == "Genesis"
 
 
 # ── Detections empty-state + pruning ────────────────────────

@@ -2,30 +2,35 @@
 app/ui/style_kit.py
 =====================
 Shared look for the app's secondary windows (Browser, History, and any
-future ones) — the same dark/gold palette as the Operator Panel's own
-dark theme, kept in one place so new windows don't hand-roll their own
-QSS. Deliberately fixed to dark (not wired to the Operator Panel's
-dark/light/system toggle) — same precedent as the existing Theme
-Designer window, and it keeps this module a plain, self-contained
-constants file with no dependency back on main_ui.py.
+future ones) — one palette kept in one place so new windows don't
+hand-roll their own QSS. Deliberately not wired to the Operator Panel's
+own theme toggle (same precedent as the existing Theme Designer window,
+and it keeps this module a plain, self-contained constants file with no
+dependency back on main_ui.py) -- instead it's hand-kept in sync with
+whichever single mode main_ui.py currently restricts itself to.
+
+Currently: light/white, matching main_ui.py's THEMES["light"] -- the
+Operator Panel is light-only for now (see its __init__ note), so
+Browse/History need to match rather than sit fixed to the old dark
+palette. Restore THEMES["dark"]'s values here if dark mode comes back.
 """
 
 PALETTE = {
-    "bg":        "#0D0F14",
-    "panel":     "#13161E",
-    "card":      "#1A1E29",
-    "border":    "#252A38",
-    "border_hi": "#353D54",
-    "text_p":    "#F0EBE0",
-    "text_m":    "#8A8FA8",
-    "text_d":    "#4A5068",
-    "gold":      "#C9A84C",
-    "gold_l":    "#E8C97A",
-    "gold_d":    "#7A6330",
-    "green":     "#3DD68C",
-    "green_d":   "#1A4D36",
-    "red":       "#E85555",
-    "red_d":     "#4D1E1E",
+    "bg":        "#F4F6FB",
+    "panel":     "#FFFFFF",
+    "card":      "#ECEEF5",
+    "border":    "#D0D4E4",
+    "border_hi": "#A0A8C8",
+    "text_p":    "#1A1D2E",
+    "text_m":    "#4A5068",
+    "text_d":    "#8A8FA8",
+    "gold":      "#7A6330",
+    "gold_l":    "#C9A84C",
+    "gold_d":    "#E8C97A",
+    "green":     "#1A7A4A",
+    "green_d":   "#C8EED8",
+    "red":       "#C0392B",
+    "red_d":     "#FADBD8",
 }
 
 RS = "6px"

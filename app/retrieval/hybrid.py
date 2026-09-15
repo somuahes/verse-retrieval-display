@@ -38,26 +38,9 @@ Single-speed pipeline:
   (self._sentence_history is a separate, still-present mechanism —
   whole-utterance granularity, used only by _extract_split_reference, for
   a book+chapter reference split across two utterances by ASR endpointing.)
-- context_decision.py's ContextManager (self.context_manager below) is NOT
-  a reintroduction of that reverted rolling-word-window design. It never
-  touches what gets SEARCHED — semantic.search_top_k() still runs against
-  exactly the current utterance's own text, same as always, so a match is
-  still only ever justified by words the operator actually just saw
-  logged. What it accumulates across utterances is evidence behind a
-  candidate VERSE already independently found each time, to decide
-  whether to act on it yet — the failure mode that got the old design
-  reverted (a stale word silently riding into an unrelated utterance's
-  score) can't happen here, because no utterance's search input is ever
-  blended with another's.
 """
 
 from app.retrieval.semantic import SemanticEngine
-from app.retrieval.context_decision import (
-    ContextManager,
-    Decision,
-    DecisionResult,
-    ScriptureCandidate,
-)
 from app.retrieval.version_detector import (
     detect_version,
     detect_navigation,
@@ -78,7 +61,6 @@ import time
 import logging
 import sqlite3
 import threading
-import numpy as np
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Callable, Dict, List, Tuple
@@ -538,26 +520,10 @@ class HybridEngine:
         self.semantic = SemanticEngine()
         self.semantic.load_version(version)
 
-        # Context-aware display decision layer — sits after semantic.py's
-        # candidates, before a verse is judged safe to show. See
-        # app/retrieval/context_decision.py and this file's own module
-        # docstring for why this is not the previously-reverted rolling-
-        # context design. embed_fn/similarity_fn reuse the SAME already-
-        # loaded SentenceTransformer semantic.py holds (self.semantic.model)
-        # for context_decision.py's contextual-alignment signal — no
-        # second model loaded, nothing reimplemented; normalize_embeddings
-        # =True (same convention semantic.py's own event_map similarity
-        # check uses) makes a plain dot product the cosine similarity.
-        self.context_manager = ContextManager(
-            embed_fn=lambda t: self.semantic.model.encode(
-                [t], convert_to_numpy=True, normalize_embeddings=True,
-            )[0],
-            similarity_fn=lambda a, b: float(np.dot(a, b)),
-        )
-
         self._verse_cb: Optional[Callable[[Optional[Dict]], None]] = None
         self._status_cb: Optional[Callable[[str, str], None]] = None
         self._no_match_cb: Optional[Callable[[], None]] = None
+        self._semantic_candidates_cb: Optional[Callable[[List[Dict], str], None]] = None
 
         self._last_match_time = 0.0
         self._last_key: Optional[str] = None
@@ -624,6 +590,14 @@ class HybridEngine:
 
     def set_no_match_callback(self, cb: Callable[[], None]):
         self._no_match_cb = cb
+
+    def set_semantic_candidates_callback(self, cb: Callable[[List[Dict], str], None]):
+        """Fires with the raw top-3 ranked semantic candidates for every
+        utterance that reaches step 5 (semantic search), independent of
+        whatever _run_semantic itself decides to display — separate from
+        set_verse_callback so the operator UI's evaluation panel can show
+        what the system actually considered, not just its final pick."""
+        self._semantic_candidates_cb = cb
 
     # ========================================================
     # SAFE SESSION HELPERS
@@ -815,7 +789,6 @@ class HybridEngine:
     def _display(self, verse: Optional[Dict], force: bool = False):
         if not verse:
             self._last_key = None
-            self.context_manager.clear_current_verse()
 
             if self._verse_cb:
                 self._verse_cb(None)
@@ -853,22 +826,6 @@ class HybridEngine:
         )
 
         self._set_state("verse_tracking")
-
-        # Keeps context_manager's hysteresis (point 9) correct regardless
-        # of WHICH path changed the display — direct reference,
-        # navigation, verse-jump, manual override, version-switch
-        # redisplay, or the semantic/context path itself. Without this, a
-        # verse put on screen by, say, a spoken direct reference would
-        # leave the context manager still comparing new semantic
-        # candidates against a stale or zeroed "current verse evidence".
-        self.context_manager.sync_current_verse(
-            (
-                str(verse.get("book", "")),
-                int(verse.get("chapter", 0)),
-                int(verse.get("verse", 0)),
-            ),
-            confidence=float(verse.get("confidence", 0.97) or 0.97),
-        )
 
         log.info(
             "📖 %s %s:%s (%s)",
@@ -1576,112 +1533,29 @@ class HybridEngine:
         if self._verse_cb:
             self._verse_cb(verse)
 
-    def _collect_semantic_candidates(
-        self, text: str, context_book: Optional[str], k: int = 3,
-    ) -> List[dict]:
-        """Top-k raw candidates (not gated by DISPLAY_THRESHOLD or any
-        confidence bar — context_manager.process_utterance() is what
-        judges these now) merged from the same-book-scoped pass (if a
-        book is currently locked) and the unscoped whole-corpus pass,
-        the same two passes semantic.py's own search() runs internally.
-        Reusing search_top_k() (a public, already-existing method) —
-        this file does not reimplement or duplicate any scoring logic
-        from semantic.py, only asks it for more than the single top
-        result search() itself would return."""
-        merged: Dict[Tuple[str, int, int], dict] = {}
-
-        if context_book:
-            for c in self.semantic.search_top_k(text, k=k, threshold=0.0, book=context_book):
-                merged[(str(c["book"]), int(c["chapter"]), int(c["verse"]))] = c
-
-        for c in self.semantic.search_top_k(text, k=k, threshold=0.0):
-            key = (str(c["book"]), int(c["chapter"]), int(c["verse"]))
-            if key not in merged or c["final_score"] > merged[key]["final_score"]:
-                merged[key] = c
-
-        ranked = sorted(merged.values(), key=lambda c: c["final_score"], reverse=True)
-        return ranked[:k]
-
-    def _act_on_context_decision(self, decision: DecisionResult, source_text: str, t0: float) -> None:
-        """Turns context_decision.py's Decision into the same UI-facing
-        side effects _run_semantic used to produce inline — _display()
-        for DISPLAY, _notify_secondary_detection() (AI Detections panel
-        only, no position/state change) for anything still worth showing
-        the operator, and the no-match callback when there is truly
-        nothing."""
-        if decision.decision == Decision.DISPLAY:
-            book, chapter, verse_no = decision.verse
-            r = db_get_verse(str(self.session.active_version), book, chapter, verse_no)
-            if not r:
-                log.warning(
-                    "Context decision DISPLAY for a verse not in the DB: %s %s:%s",
-                    book, chapter, verse_no,
-                )
-                return
-            r["match_type"] = "semantic"
-            r["confidence"] = decision.evidence
-            r["matched_at"] = time.time()
-            r["source_text"] = source_text
-            log.info(
-                "Context decision DISPLAY: %s %s:%s evidence=%.3f (%.0fms) — %s",
-                book, chapter, verse_no, decision.evidence,
-                (time.time() - t0) * 1000.0, decision.reason,
-            )
-            self._display(r)
-            return
-
-        if decision.decision == Decision.KEEP_CURRENT:
-            log.debug("Context decision KEEP_CURRENT — %s", decision.reason)
-            return
-
-        # WAIT_FOR_CONTEXT / HUMAN_CONFIRMATION_REQUIRED / NO_CONFIDENT_MATCH
-        # with a leading candidate still worth showing the operator (log-
-        # only, same contract _notify_secondary_detection has always had:
-        # never touches _last_key/session position/state).
-        if decision.verse:
-            book, chapter, verse_no = decision.verse
-            row = db_get_verse(str(self.session.active_version), book, chapter, verse_no)
-            if row:
-                row["match_type"] = "semantic"
-                row["confidence"] = decision.evidence
-                row["matched_at"] = time.time()
-                row["source_text"] = source_text
-                row["_context_state"] = decision.state.name if decision.state else ""
-                row["_below_confidence"] = decision.decision != Decision.HUMAN_CONFIRMATION_REQUIRED
-                row["_human_confirmation"] = decision.decision == Decision.HUMAN_CONFIRMATION_REQUIRED
-                log.info(
-                    "Context decision %s: %s %s:%s evidence=%.3f — %s",
-                    decision.decision.name, book, chapter, verse_no,
-                    decision.evidence, decision.reason,
-                )
-                self._notify_secondary_detection(row)
-                return
-
-        log.debug("Context decision %s — %s", decision.decision.name, decision.reason)
-        if getattr(self.session, "state", "") == "context_matching":
-            if self._no_match_cb:
-                self._no_match_cb()
-
     def _run_semantic(self, text: str):
         """Step 5 — context-aware semantic search.
 
         text: the single utterance that triggered this resolution. This is
-        both what gets SEARCHED (semantic.search_top_k() runs against
-        exactly this string, nothing blended in from any other utterance)
-        and what gets shown to the operator as "heard" when a candidate is
-        surfaced from it. What DOES span multiple utterances is the
-        evidence-accumulation/decision layer in context_decision.py — see
-        the module docstring's note on why that is not the previously-
-        reverted rolling-word-window design.
+        both what gets searched and what gets shown to the operator as
+        "heard" — deliberately the same string, so there's no way for a
+        match to be justified on screen by words the operator never saw.
+        An earlier design searched a persistent rolling word window
+        instead, wider than what it displayed, and delayed this whole step
+        behind a grace-period timer to blend it with whatever utterance
+        came next; confirmed live that a stale word from an already-decided
+        group could silently ride into an unrelated later utterance's
+        score, and that the delay itself made a correct match arrive too
+        late to be useful. See the module docstring.
         """
         t0 = time.time()
         self._check_timeout()
 
         if not self._semantic_enabled():
             # See _semantic_enabled's docstring. Same outcome as "found
-            # nothing" since that's exactly what this is — not a real
-            # search, so nothing to report as a candidate, only as a
-            # plain miss.
+            # nothing" (step 6 below) since that's exactly what this is —
+            # not a real search, so nothing to report as a candidate,
+            # only as a plain miss.
             log.debug(
                 "Semantic search skipped — %s has no working embedding "
                 "model (English-only): %r",
@@ -1692,35 +1566,40 @@ class HybridEngine:
                     self._no_match_cb()
             return
 
+        # See SEMANTIC_CONFIDENCE_HI's comment — the higher cross-book bar
+        # applies only while actively sequential-navigating, not merely
+        # "tracking" (which covers any single prior detection too).
+        actively_sequential = getattr(self.session, "state", "") == "sequential"
         context_book = self._current_context_book()
+
         log.info("Semantic (%d words): %r", len(text.split()), text)
 
-        # semantic.py's own search() still runs first, unchanged — it
-        # already does phrase-map/event-map lookup then the context-
-        # scoped/unscoped statistical passes internally, and remains the
-        # one place that logic lives (not duplicated here). Its result is
-        # used two ways below: a curated phrase_map/event_map hit is
-        # hand-verified evidence, treated the same tier as a spoken
-        # direct reference (bypasses accumulation via
-        # explicit_reference=); anything else becomes one of the ranked
-        # candidates handed to the context manager instead of being
-        # accepted or rejected on the spot.
-        top1 = self.semantic.search(text, context_book=context_book)
-        source_text = text
+        sem = self.semantic.search(text, context_book=context_book)
+        sem_source_text = text
 
-        if not top1:
+        if not sem:
             # This utterance alone may be an incomplete fragment of one
             # continuous thought ASR's signal-driven endpointing split
-            # across a mid-phrase pause — see this method's previous
-            # version/PROGRESS.md for the Hebrews 4:15 case this exists
-            # for. Only the ONE immediately preceding utterance is ever
-            # considered, only when THIS utterance alone matched nothing.
+            # across a mid-phrase pause (e.g. "...he was tempted in all
+            # points." / "but without sin." spoken as two separate
+            # utterances — together, Hebrews 4:15; neither half alone
+            # paraphrases anything). A single, immediate retry against
+            # the combined text — NOT the persistent, delayed
+            # rolling-window design tried and reverted before (see this
+            # method's own docstring): no delay is added to the normal
+            # path, and only the ONE immediately preceding utterance is
+            # ever considered, only when THIS utterance alone matched
+            # nothing at all, so a stale word can't silently ride into a
+            # much later, unrelated utterance's score the way the
+            # reverted design's open-ended buffer did.
             combined = self._short_trailing_fragment(text)
             if combined:
-                combined_top1 = self.semantic.search(combined, context_book=context_book)
-                if combined_top1:
-                    top1 = combined_top1
-                    source_text = combined
+                combined_sem = self.semantic.search(
+                    combined, context_book=context_book
+                )
+                if combined_sem:
+                    sem = combined_sem
+                    sem_source_text = combined
                     log.info(
                         "Semantic match found only after combining with "
                         "the previous utterance (one thought split by a "
@@ -1728,18 +1607,127 @@ class HybridEngine:
                         combined[:100],
                     )
 
-        explicit_reference = None
-        if top1 and top1.get("method") in ("phrase_map", "event_map"):
-            explicit_reference = ScriptureCandidate.from_result(top1, source_text=source_text)
+        if self._semantic_candidates_cb:
+            # Raw top-3, unscoped, independent of whatever gets decided
+            # below — an operator evaluating the system needs to see
+            # what it actually ranked highest, not just the one verse
+            # (if any) that cleared this utterance's display bar.
+            try:
+                top3 = self.semantic.search_top_k(sem_source_text, k=3)
+            except Exception:
+                top3 = []
+            self._semantic_candidates_cb(top3, sem_source_text)
 
-        candidates_raw = self._collect_semantic_candidates(source_text, context_book)
-        candidates = [ScriptureCandidate.from_result(c, source_text=source_text) for c in candidates_raw]
+        if sem:
+            final_score = float(sem.get("final_score", 0))
+            in_context = bool(sem.get("in_context", False))
+            threshold = (
+                SEMANTIC_CONFIDENCE
+                if in_context
+                else (SEMANTIC_CONFIDENCE_HI if actively_sequential else SEMANTIC_CONFIDENCE)
+            )
 
-        decision = self.context_manager.process_utterance(
-            source_text, candidates, explicit_reference=explicit_reference,
-        )
+            # Judged purely against the absolute threshold for this
+            # candidate (in-context vs tracking vs default — see above),
+            # not against whatever confidence happens to already be on
+            # screen. A same-book verse read immediately after a
+            # high-confidence one can legitimately score lower and still
+            # clear its own bar — e.g. Romans 7:24 read right after 7:23 —
+            # and previously got silently blocked by a relative "must beat
+            # the on-screen score" gate that's been removed.
+            if final_score >= threshold:
+                log.info(
+                    "Semantic: %s %s:%s score=%.3f method=%s "
+                    "(resolved in %.0fms)",
+                    sem.get("book"),
+                    sem.get("chapter"),
+                    sem.get("verse"),
+                    final_score,
+                    sem.get("method", ""),
+                    (time.time() - t0) * 1000.0,
+                )
 
-        self._act_on_context_decision(decision, source_text, t0)
+                r = db_get_verse(
+                    str(self.session.active_version),
+                    str(sem.get("book", "")),
+                    int(sem.get("chapter", 0)),
+                    int(sem.get("verse", 0)),
+                )
+
+                if r:
+                    r["match_type"] = "semantic"
+                    r["confidence"] = final_score
+                    r["matched_at"] = time.time()
+                    r["source_text"] = sem_source_text
+                    self._display(r)
+                    return
+
+                sem["version"] = str(self.session.active_version)
+                sem["match_type"] = "semantic"
+                sem["confidence"] = final_score
+                sem["matched_at"] = time.time()
+                sem["source_text"] = sem_source_text
+                self._display(sem)
+                return
+
+            # The engine found a real candidate — semantic.py already
+            # cleared its own internal bar (DISPLAY_THRESHOLD / lexical
+            # gates) to even return this — but it misses the stricter
+            # bar this caller is judging against right now (in_context
+            # vs tracking vs default — see above). That's still a
+            # genuine detection, not nothing: surface it to the AI
+            # Detections panel as a log entry via the same
+            # display-free path _log_semantic_shadow uses, instead of
+            # discarding it below with zero operator-visible trace.
+            log.info(
+                "Semantic (below bar): %s %s:%s score=%.3f "
+                "(need >= %.2f)",
+                sem.get("book"), sem.get("chapter"), sem.get("verse"),
+                final_score, threshold,
+            )
+            row = db_get_verse(
+                str(self.session.active_version),
+                str(sem.get("book", "")),
+                int(sem.get("chapter", 0)),
+                int(sem.get("verse", 0)),
+            )
+            notify = row or sem
+            notify["match_type"] = "semantic"
+            notify["confidence"] = final_score
+            notify["matched_at"] = time.time()
+            notify["source_text"] = sem_source_text
+            notify.setdefault("version", str(self.session.active_version))
+            # Log-only: unlike the shadow-disagreement notify below (which
+            # deliberately stays eligible for normal Auto/Manual promotion
+            # — see its comment), this candidate was already judged and
+            # rejected against the correct bar for right now. Letting it
+            # still clear the UI's separate, lower auto-push confidence
+            # would silently undo that decision, so main_ui.py's _on_verse
+            # must never promote it — see its "_below_confidence" check.
+            notify["_below_confidence"] = True
+            self._notify_secondary_detection(notify)
+            return
+
+        # ====================================================
+        # 6. No match — semantic.py's own search() already checked
+        # phrase/event map and the FAISS+lexical hybrid and found nothing
+        # that cleared even ITS OWN internal display bar. Previously this
+        # also surfaced the single best raw candidate regardless of score
+        # (bypassing search()'s own bar via search_top_k directly) so the
+        # operator could see what the engine came closest to — reverted:
+        # confirmed live it surfaced low-value noise (e.g. a 41%-score
+        # guess) more often than a genuinely useful near-miss, and the
+        # bar-miss case above (which DID clear semantic.py's own internal
+        # threshold, just not this caller's stricter contextual one)
+        # already covers the "real candidate, just not confident enough
+        # right now" case with a much higher floor. Truly nothing found
+        # anywhere just means nothing shows, same as before that change.
+        # ====================================================
+        log.debug("No match: %s", text[:80])
+
+        if getattr(self.session, "state", "") == "context_matching":
+            if self._no_match_cb:
+                self._no_match_cb()
 
     # ========================================================
     # MANUAL OVERRIDE

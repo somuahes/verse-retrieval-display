@@ -73,24 +73,6 @@ def test_send_preview_signal_carries_the_clicked_verse(qapp):
     bw.close()
 
 
-def test_add_queue_signal_carries_the_clicked_verse(qapp):
-    bw = BrowsePanel(initial_version="KJV")
-    _select_book(bw, "Genesis")
-    bw._on_chapter_selected(1)
-
-    received = {}
-    bw.add_queue.connect(lambda v: received.setdefault("verse", v))
-
-    row = next(
-        bw._verses_layout.itemAt(i).widget()
-        for i in range(bw._verses_layout.count())
-        if isinstance(bw._verses_layout.itemAt(i).widget(), BrowserVerseRow)
-    )
-    row.add_queue.emit(row._verse)
-
-    assert received["verse"]["book"] == "Genesis"
-    bw.close()
-
 
 def test_switching_book_clears_previous_chapter_and_verses(qapp):
     bw = BrowsePanel(initial_version="KJV")

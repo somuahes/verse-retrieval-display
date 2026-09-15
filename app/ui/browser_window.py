@@ -35,7 +35,6 @@ class BrowserVerseRow(QFrame):
     result-row widgets (AI Detections / Search)."""
 
     send_preview = pyqtSignal(dict)
-    add_queue = pyqtSignal(dict)
 
     def __init__(self, verse: dict, parent=None):
         super().__init__(parent)
@@ -70,13 +69,6 @@ class BrowserVerseRow(QFrame):
         send_btn.clicked.connect(lambda: self.send_preview.emit(self._verse))
         lay.addWidget(send_btn)
 
-        add_btn = QPushButton("+")
-        add_btn.setToolTip("Add to Queue")
-        add_btn.setFixedSize(26, 22)
-        add_btn.setStyleSheet(sk.btn_qss("ghost"))
-        add_btn.clicked.connect(lambda: self.add_queue.emit(self._verse))
-        lay.addWidget(add_btn)
-
 
 class BrowsePanel(QWidget):
     """Embeddable Books | Chapters | Verses panel — the Operator Panel
@@ -84,7 +76,6 @@ class BrowsePanel(QWidget):
     own top-level window."""
 
     send_preview = pyqtSignal(dict)
-    add_queue = pyqtSignal(dict)
     closed = pyqtSignal()
 
     PANEL_WIDTH = 650
@@ -275,6 +266,5 @@ class BrowsePanel(QWidget):
         for v in verses:
             row = BrowserVerseRow(v)
             row.send_preview.connect(self.send_preview.emit)
-            row.add_queue.connect(self.add_queue.emit)
             self._verses_layout.addWidget(row)
         self._verses_layout.addStretch()

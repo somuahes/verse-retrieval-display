@@ -33,7 +33,7 @@ class Theme:
 
     # Background
     background_type: str = "solid"       # "solid" | "image"
-    background_color: str = "#000000"
+    background_color: str = "#14213D"    # deep oxford blue, not flat black
     background_image_path: str = ""
     background_fit: str = "cover"        # "cover" | "contain" | "stretch"
 
@@ -65,7 +65,7 @@ def default_starter_themes() -> List[Theme]:
             text_color="#F0EBE0", text_align="center",
             ref_font_family="Georgia", ref_font_size=28, ref_color="#D4AF37",
             reference_position="below",
-            background_type="solid", background_color="#000000",
+            background_type="solid", background_color="#14213D",
             content_area_pct=80, padding=60, element_spacing=28,
         ),
         Theme(
@@ -74,7 +74,7 @@ def default_starter_themes() -> List[Theme]:
             text_color="#FFFFFF", text_align="center",
             ref_font_family="Segoe UI", ref_font_size=22, ref_color="#8A8FA8",
             reference_position="below",
-            background_type="solid", background_color="#0D0F14",
+            background_type="solid", background_color="#1C2333",
             content_area_pct=70, padding=70, element_spacing=22,
         ),
         Theme(

@@ -5,7 +5,9 @@ Projection display — what the congregation sees.
 
 - Renders from an active Theme (app/ui/theme_model.py) — font, color,
   alignment, solid/image background, layout
-- Smooth fade-in / fade-out on every verse change
+- Instant on the very first verse after opening/clearing (nothing to
+  cross-fade from); smooth fade-in / fade-out on every verse change
+  after that
 - Clears to blank when STOP is received
 - Resizes font automatically to fit any screen resolution
 - Opens windowed (resizable, movable, normal frame) by default — the
@@ -246,6 +248,13 @@ class DisplayWindow(QWidget):
             self.clear()
             return
 
+        # Nothing is on screen yet right after the display opens (or
+        # after a Clear) -- fading OUT already-invisible text before
+        # fading the new text IN just adds a wasted FADE_MS delay with
+        # nothing visible to show for it. Project the first verse
+        # instantly; only verse-to-verse changes get the fade.
+        first_appearance = self._current_verse is None
+
         self._current_verse = verse
         text = str(verse.get("text",    ""))
         book = str(verse.get("book",    ""))
@@ -256,16 +265,23 @@ class DisplayWindow(QWidget):
 
         font_size = self._fit_font_size(text)
         self._verse_label.setFont(self._body_font(font_size))
-        self._fade_out(lambda: self._set_content(text, reference))
+        if first_appearance:
+            self._set_content(text, reference, animate_in=False)
+        else:
+            self._fade_out(lambda: self._set_content(text, reference))
 
     def clear(self):
         self._current_verse = None
         self._fade_out(lambda: self._set_content("", ""))
 
-    def _set_content(self, text: str, reference: str):
+    def _set_content(self, text: str, reference: str, animate_in: bool = True):
         self._verse_label.setText(text)
         self._ref_label.setText(reference)
-        self._fade_in()
+        if animate_in:
+            self._fade_in()
+        else:
+            self._verse_label.set_opacity(1.0)
+            self._ref_label.set_opacity(1.0)
 
     def _fade_out(self, then=None):
         self._animate(self._verse_label, 1.0, 0.0)

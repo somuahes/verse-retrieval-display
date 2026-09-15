@@ -1,0 +1,32 @@
+id,case_type,input,expected,detected,match_type,confidence,correct,false_positive,missed,direct_ref_ms,semantic_ms,db_lookup_ms,asr_ms,total_ms
+gen-1,semantic,the fruit of the spirit is love joy peace,Galatians 5:22,Galatians 5:22,semantic,0.736,True,False,False,110.53,24.54,0.58,,135.65
+gen-2,semantic,greater love hath no man than this that a man lay down his life for his friends,John 15:13,John 15:13,semantic,0.824,True,False,False,1.48,14.16,0.57,,16.22
+gen-3,semantic,man shall not live by bread alone,Matthew 4:4,Matthew 4:4,semantic,0.825,True,False,False,1.11,13.04,0.58,,14.74
+gen-4,semantic,the truth shall make you free,John 8:32,John 8:32,semantic,0.805,True,False,False,1.09,13.0,0.57,,14.66
+gen-5,semantic,many are called but few are chosen,Matthew 22:13,Matthew 22:13,semantic,0.789,True,False,False,1.12,13.14,0.58,,14.84
+gen-6,semantic,pride goes before a fall,Proverbs 16:18,(no match),,,False,False,True,1.03,13.01,0.0,,14.04
+gen-7,semantic,money is the root of all evil,1 Timothy 6:10,1 Timothy 6:10,semantic,0.77,True,False,False,1.13,13.93,0.82,,15.89
+gen-8,semantic,spare the rod spoil the child,Proverbs 13:24,(no match),,,False,False,True,2.0,14.59,0.0,,16.59
+gen-9,semantic,a house divided against itself cannot stand,Matthew 12:25,Mark 3:25,semantic,0.753,False,False,False,1.3,14.09,0.58,,15.98
+gen-10,semantic,an eye for an eye and a tooth for a tooth,Exodus 21:24,Matthew 5:38,semantic,0.798,False,False,False,1.4,14.12,0.65,,16.17
+gen-11,semantic,and God said let there be light,Genesis 1:3,Genesis 1:3,semantic,0.864,True,False,False,1.22,15.29,0.66,,17.18
+gen-12,semantic,the lord gives and the lord takes away,Job 1:21,(no match),,,False,False,True,1.58,16.98,0.0,,18.57
+gen-13,semantic,cast your bread upon the waters,Ecclesiastes 11:1,Ecclesiastes 11:1,semantic,0.618,True,False,False,1.43,18.17,0.64,,20.24
+gen-14,semantic,a soft answer turns away wrath,Proverbs 15:1,(no match),,,False,False,True,1.15,14.85,0.0,,16.01
+gen-15,semantic,iron sharpens iron,Proverbs 27:17,(no match),,,False,False,True,1.3,17.4,0.0,,18.71
+gen-16,semantic,be angry and sin not,Ephesians 4:26,(no match),,,False,False,True,1.22,14.34,0.0,,15.57
+gen-17,semantic,let your light so shine before men,Matthew 5:16,Matthew 5:16,semantic,0.749,True,False,False,1.25,13.88,0.67,,15.81
+gen-18,semantic,no man can serve two masters,Matthew 6:24,Matthew 6:24,semantic,0.78,True,False,False,1.15,13.45,0.61,,15.22
+gen-19,semantic,physician heal thyself,Luke 4:23,Luke 4:23,semantic,0.631,True,False,False,1.06,13.15,0.59,,14.8
+gen-20,semantic,can a leopard change its spots,Jeremiah 13:23,(no match),,,False,False,True,1.15,13.31,0.0,,14.47
+gen-21,semantic,the spirit is willing but the flesh is weak,Matthew 26:40,Matthew 26:40,semantic,0.663,True,False,False,1.28,13.5,0.58,,15.36
+gen-22,semantic,let him that is without sin cast the first stone,John 8:7,John 8:7,semantic,0.669,True,False,False,1.3,15.06,0.59,,16.96
+gen-23,semantic,consider the lilies of the field how they grow,Matthew 6:28,Matthew 6:28,semantic,0.725,True,False,False,1.28,14.5,0.58,,16.38
+gen-24,semantic,in my fathers house are many mansions,John 14:2,(no match),,,False,False,True,1.19,16.77,0.0,,17.96
+gen-25,semantic,vengeance is mine i will repay saith the lord,Romans 12:19,Romans 12:19,semantic,0.67,True,False,False,1.4,13.76,0.62,,15.79
+gen-26,semantic,do not cast your pearls before swine,Matthew 7:6,Matthew 7:6,semantic,0.688,True,False,False,1.21,13.14,0.6,,14.96
+gen-27,semantic,ye are the salt of the earth,Matthew 5:13,Matthew 5:13,semantic,0.717,True,False,False,1.12,14.54,0.88,,16.55
+gen-28,semantic,eat drink and be merry,Luke 12:19,(no match),,,False,False,True,2.01,15.75,0.0,,17.76
+gen-29,semantic,to every thing there is a season,Ecclesiastes 3:1,Ecclesiastes 3:1,semantic,0.709,True,False,False,1.17,13.42,0.56,,15.16
+gen-30,semantic,be still and know that i am God,Psalms 46:10,Psalms 46:10,semantic,0.655,True,False,False,1.15,14.15,0.58,,15.89
+gen-31,semantic,the lord is my light and my salvation whom shall i fear,Psalms 27:1,Psalms 27:1,semantic,0.821,True,False,False,1.35,21.66,0.87,,23.89

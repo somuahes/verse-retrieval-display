@@ -1,0 +1,33 @@
+id,case_type,input,expected,detected,match_type,confidence,correct,false_positive,missed,direct_ref_ms,semantic_ms,db_lookup_ms,asr_ms,total_ms
+direct-1,direct,John 3:16,John 3:16,John 3:16,direct,0.97,True,False,False,269.27,0.0,0.59,,269.86
+direct-2,direct,John chapter 3 verse 16,John 3:16,John 3:16,direct,0.97,True,False,False,0.92,0.0,0.4,,1.32
+direct-3,direct,Mark 1 2,Mark 1:2,Mark 1:2,direct,0.97,True,False,False,0.77,0.0,0.37,,1.14
+direct-4,direct,Mark 12,Mark 12:1,Mark 12:1,direct,0.97,True,False,False,0.83,0.0,0.39,,1.22
+direct-5,direct,Matthew 6.33,Matthew 6:33,Matthew 6:33,direct,0.97,True,False,False,0.78,0.0,0.37,,1.15
+direct-6,direct,Matthew 5 verse 10,Matthew 5:10,Matthew 5:10,direct,0.97,True,False,False,0.79,0.0,0.37,,1.16
+direct-7,direct,Romans eight twenty eight,Romans 8:28,Romans 8:28,direct,0.97,True,False,False,0.87,0.0,0.41,,1.28
+direct-8,direct,First Corinthians 13:4,1 Corinthians 13:4,1 Corinthians 13:4,direct,0.97,True,False,False,0.82,0.0,0.38,,1.2
+direct-9,direct,Ps 23:1,Psalms 23:1,Psalms 23:1,direct,0.97,True,False,False,0.73,0.0,0.37,,1.1
+direct-10,direct,Revelations 3:20,Revelation 3:20,Revelation 3:20,direct,0.97,True,False,False,0.76,0.0,0.42,,1.18
+semantic-1,semantic,for god so loved the world,John 3:16,John 3:16,semantic,1.0,True,False,False,0.85,83.36,0.59,,84.81
+semantic-2,semantic,I am the way the truth and the life,John 14:6,John 14:6,semantic,1.0,True,False,False,0.95,81.42,0.49,,82.87
+semantic-3,semantic,the lord is my shepherd,Psalms 23:1,Psalms 23:1,semantic,1.0,True,False,False,0.86,45.02,0.48,,46.37
+semantic-4,semantic,I can do all things through christ,Philippians 4:13,Philippians 4:13,semantic,1.0,True,False,False,1.06,93.21,0.49,,94.77
+semantic-5,semantic,all things work together for good,Romans 8:28,Romans 8:28,semantic,1.0,True,False,False,0.96,87.63,0.98,,89.58
+semantic-6,semantic,trust in the lord with all your heart,Proverbs 3:5,Proverbs 3:5,semantic,1.0,True,False,False,1.43,72.5,0.67,,74.61
+semantic-7,semantic,the prodigal son,Luke 15:11,Luke 15:11,semantic,1.0,True,False,False,1.38,92.36,0.52,,94.26
+semantic-8,semantic,david and goliath,1 Samuel 17:1,1 Samuel 17:1,semantic,1.0,True,False,False,0.84,26.39,0.44,,27.67
+semantic-9,semantic,be strong and do not be afraid for god is with you,Deuteronomy 31:6,(no match),,,False,False,True,1.08,17.96,0.0,,19.05
+semantic-10,semantic,god will supply everything you need,Philippians 4:19,(no match),,,False,False,True,1.07,12.52,0.0,,13.59
+semantic-11,semantic,if you have faith you can move a mountain,Matthew 17:20,Matthew 17:20,semantic,1.0,True,False,False,1.21,82.02,0.55,,83.78
+semantic-12,semantic,nothing can separate us from the love of god,Romans 8:35,Romans 8:35,semantic,1.0,True,False,False,1.05,96.18,0.53,,97.76
+semantic-13,semantic,"So when Paul was talking about the law of God, he said I see then another law",Romans 7:23,(no match),,,False,False,True,1.46,13.92,0.0,,15.38
+nomatch-1,no_match_expected,good morning everyone how are you today,:,(no match),,,False,False,False,1.09,12.51,0.0,,13.61
+nomatch-2,no_match_expected,can you hear me at the back,:,(no match),,,False,False,False,1.08,12.53,0.0,,13.62
+nomatch-3,no_match_expected,lets all stand and worship together,:,(no match),,,False,False,False,1.12,12.74,0.0,,13.86
+nomatch-4,no_match_expected,thank you pastor for that word,:,(no match),,,False,False,False,1.09,12.49,0.0,,13.58
+nomatch-5,no_match_expected,lets pray before we continue,:,(no match),,,False,False,False,1.07,12.63,0.0,,13.7
+nomatch-6,no_match_expected,god is good all the time,:,(no match),,,False,False,False,1.09,13.0,0.0,,14.1
+nomatch-7,no_match_expected,we need to have faith in god,:,(no match),,,False,False,False,1.12,13.03,0.0,,14.15
+nomatch-8,no_match_expected,i believe god is with us today,:,(no match),,,False,False,False,1.13,13.13,0.0,,14.27
+nomatch-9,no_match_expected,god loves each and every one of us,:,(no match),,,False,False,False,1.17,13.1,0.0,,14.27

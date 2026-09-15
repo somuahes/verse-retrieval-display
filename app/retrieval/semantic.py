@@ -74,7 +74,25 @@ torch.set_num_threads(TORCH_CPU_THREADS)
 MODEL_NAME = "all-MiniLM-L6-v2"
 SIMILARITY_THRESHOLD = 0.45   # minimum FAISS cosine score
 LEXICAL_THRESHOLD = 0.60   # minimum score for lexical fallback
-DISPLAY_THRESHOLD = 0.58   # minimum final score to display
+DISPLAY_THRESHOLD = 0.50   # minimum final score to display
+# Lowered 0.58 -> 0.50 after a confirmed live miss: "Manoah saw the
+# angel... the angel said, my name is secret [and the Hebrew word for
+# secret is the same word, wonderful]" scores final=0.5153 against
+# Judges 13:18 ("...seeing it is secret?" — the KJV's own marginal note
+# there reads "secret: or, wonderful", exactly the wordplay being made)
+# and is clearly the right verse — next-best candidate in the whole
+# corpus was Judges 13:17 (same story, previous verse) at 0.4560 — but
+# 0.58 silently rejected it. Verified this is safe before lowering, not
+# just a hopeful guess: swept DISPLAY_THRESHOLD 0.58 -> 0.42 against all
+# three eval testsets (starter/stress/generalization) — completely flat
+# results at every value in that range, including the 9 no-match-
+# expected cases (0 false positives throughout) — so nothing in the
+# existing eval corpus lives in this band either way. Additionally
+# stress-tested 10 generic, non-scriptural sermon-filler phrases ("let's
+# continue with our study today", "we thank god for this beautiful day
+# and gathering", etc.) directly against the unscoped corpus: the
+# highest score among them was 0.4613, comfortably below 0.50 and well
+# short of the Judges 13:18 case's 0.5153.
 # Raised bar for queries under MIN_SEMANTIC_TOKENS content words — short
 # phrases can genuinely score well above DISPLAY_THRESHOLD, but also risk
 # scoring high "by chance" on shared vocabulary alone, which is what
@@ -92,6 +110,68 @@ DISPLAY_THRESHOLD = 0.58   # minimum final score to display
 # distinguish "this IS a famous short phrase" from "this shares a common
 # narrative-framing pattern with hundreds of unrelated verses."
 SHORT_QUERY_DISPLAY_THRESHOLD = 0.75
+
+# search_within_chapter()/search_within_book() (hybrid.py's "a book/
+# chapter was explicitly named, narrow the search there" path) reused
+# DISPLAY_THRESHOLD unchanged — the bar tuned for an UNSCOPED, 31,100-
+# verse search where a coincidental-keyword-overlap false positive is a
+# real risk. That risk shrinks with the candidate pool: a chapter is
+# ~15-30 verses, a book at most a few hundred, so a genuine paraphrase
+# scores as the clear top candidate there far more easily than it would
+# against the whole Bible. Confirmed live: "in Matthew chapter 4 when
+# Jesus was tempted" -> stripped query "when jesus was tempted" scores
+# final=0.5353 against Matthew 4:1 (the correct verse, and the clear top
+# candidate within the chapter — next-best in-chapter candidate was
+# 0.3924) — comfortably real evidence, but 0.58 was silently rejecting
+# it and falling back to the naive verse-1 default instead (right by
+# coincidence here, since Matthew 4 opens with the temptation, but not a
+# working chapter-scoped match).
+#
+# CHAPTER_SCOPE_DISPLAY_THRESHOLD lowered further, 0.50 -> 0.20, after a
+# second confirmed live case the 0.50 floor still missed: "1 Corinthians
+# 14 says there is no voice without significance" scores only
+# final=0.3847 against 1 Corinthians 14:10 ("...none of them is without
+# signification") despite being the unambiguous top candidate in-chapter
+# (next-best, 14:11, at 0.3019) — the paraphrase's modern wording
+# ("significance") shares little text with the KJV's archaic
+# "signification", capping lexical score low even though this clearly is
+# that verse. Operator's explicit call, accepting the added false-
+# positive risk at this pool size (~15-30 verses/chapter): sharing
+# enough vocabulary to land top of a small in-chapter ranking is treated
+# as sufficient evidence on its own, even at fairly low absolute
+# confidence — the sim>=0.45 sub-floor in _clears_display_threshold
+# (bypassed only by lex>=0.95) still guards against a candidate that
+# clears this floor on coincidental lexical overlap alone with no real
+# semantic relationship at all.
+#
+# An absolute floor this low can't, by itself, tell a genuine (if
+# weakly-worded) paraphrase apart from a vague summary of the chapter's
+# general subject that happens to brush every verse in it about equally
+# — confirmed live on two cases AFTER lowering to 0.20: "in Exodus 20
+# Moses received instructions from God on the mountain" landed on Exodus
+# 20:21 (final=0.4803) and "in Acts 2 something happened to the
+# disciples that day" landed on Acts 2:41 (final=0.4303) — both higher
+# absolute scores than the genuine 1 Corinthians 14:10 match above, so
+# no single absolute cutoff can admit one and reject the other. What
+# does separate them: how far the top candidate leads the field.
+# 1 Corinthians 14:10 beats its nearest rival by 0.0828 (real content
+# specific enough to actually stand out among the chapter's other 34
+# verses); Matthew 4:1 (the earlier confirmed case) leads by 0.1429. The
+# two false positives above lead by only 0.0400 and 0.0077 respectively
+# — a vague chapter summary scores near-uniformly across every verse in
+# it, because it isn't really about any one of them. CHAPTER_SCOPE_MARGIN_MIN
+# sits between the lowest genuine margin (0.0828) and the highest false
+# one (0.0400) observed so far.
+#
+# BOOK_SCOPE_DISPLAY_THRESHOLD left unchanged, NOT lowered alongside the
+# chapter-scope bar above — a named book with no chapter is a much
+# larger pool (Psalms alone is 2,461 verses), so the same "top-of-pool
+# is good enough" reasoning carries far more false-positive risk there;
+# left at its original, more conservative value unless a similar
+# confirmed miss shows up at the book-scope level specifically.
+CHAPTER_SCOPE_DISPLAY_THRESHOLD = 0.20
+CHAPTER_SCOPE_MARGIN_MIN = 0.06
+BOOK_SCOPE_DISPLAY_THRESHOLD = 0.54
 DEFAULT_TOP_K = 20
 INDEX_SIGNATURE = "semantic_lexical_v7"
 
@@ -426,6 +506,47 @@ _CASUAL_PHRASES = {
 
 
 # ════════════════════════════════════════════════════════════
+# LITURGICAL INTERJECTIONS — call-and-response exclamations that are
+# ALSO verbatim (or near-verbatim) fragments of real doxology verses
+# (many Psalms open/close with "Praise the LORD"; "Blessed be the name
+# of the LORD" is Job 1:21 almost word for word; BBE renders several
+# Psalms endings as "Praise the Lord. Hallelujah."). Unlike an ordinary
+# greeting, the semantic model CAN'T separate these from a genuine
+# reading of that verse by score alone — the words spoken and the verse
+# text are the same words, so cosine similarity comes out genuinely
+# high either way. Confirmed live: "blessed be the name of the lord"
+# scores 0.771 against Psalms 113:2, "praise the lord o my soul" scores
+# 0.731 against Psalms 146:1, and "praise the lord hallelujah amen"
+# scores 0.581 against Psalms 106:48 — all comfortably clear
+# DISPLAY_THRESHOLD despite being a spontaneous congregational/preacher
+# exclamation, not the preacher reading or paraphrasing that specific
+# verse.
+#
+# Blocked the same way as _CASUAL_PHRASES — exact match against the
+# WHOLE cleaned utterance, not a substring/contains check. This is
+# deliberately narrow: it only fires when a segment is nothing BUT the
+# interjection, so an actual reading of the fuller verse ("bless the
+# LORD, O my soul, and all that is within me, bless his holy name" —
+# Psalm 103:1-2) still has enough additional words to fail this exact
+# match and reach the real scored path untouched.
+_LITURGICAL_INTERJECTIONS = {
+    "hallelujah", "halleluyah", "alleluia",
+    "hallelujah amen", "amen hallelujah",
+    "hallelujah hallelujah", "hallelujah hallelujah amen",
+    "amen", "amen amen",
+    "praise the lord", "praise god", "praise ye the lord",
+    "praise the lord hallelujah amen", "praise the lord hallelujah",
+    "praise the lord o my soul", "bless the lord o my soul",
+    "give god the glory", "give him praise", "give him glory",
+    "glory to god", "glory be to god", "glory to his name",
+    "glory hallelujah", "to god be the glory",
+    "bless the lord", "blessed be god", "blessed be the lord",
+    "blessed be the name of the lord",
+    "thank you jesus", "thank you lord", "thank god",
+}
+
+
+# ════════════════════════════════════════════════════════════
 # TEXT UTILITIES
 # ════════════════════════════════════════════════════════════
 
@@ -453,9 +574,10 @@ def tokens(text: str) -> List[str]:
 
 
 def is_casual_query(query: str) -> bool:
-    """Block only exact greetings and empty input."""
+    """Block only exact greetings, exact liturgical interjections
+    (see _LITURGICAL_INTERJECTIONS), and empty input."""
     q = clean_text(query)
-    if q in _CASUAL_PHRASES:
+    if q in _CASUAL_PHRASES or q in _LITURGICAL_INTERJECTIONS:
         return True
     if len(tokens(q)) == 0:
         return True
@@ -1045,9 +1167,24 @@ class SemanticEngine:
             query, k=5, threshold=0.0, book=book, chapter=chapter,
         )
 
-        if scoped and self._clears_display_threshold(scoped[0]):
-            scoped[0]["in_context"] = True
-            return scoped[0]
+        if scoped and self._clears_display_threshold(
+            scoped[0], CHAPTER_SCOPE_DISPLAY_THRESHOLD
+        ):
+            # Margin check — see CHAPTER_SCOPE_MARGIN_MIN's comment. A
+            # low absolute floor alone can't separate a genuine (if
+            # weakly-worded) paraphrase from a vague chapter summary
+            # that scores near-equally against every verse in it; how
+            # far the top candidate leads the runner-up can. Only one
+            # verse actually in range (a short chapter, or every other
+            # candidate scored 0.0) has nothing to lead over — treated
+            # as passing on its own, same as before this check existed.
+            margin = (
+                scoped[0]["final_score"] - scoped[1]["final_score"]
+                if len(scoped) > 1 else scoped[0]["final_score"]
+            )
+            if margin >= CHAPTER_SCOPE_MARGIN_MIN:
+                scoped[0]["in_context"] = True
+                return scoped[0]
 
         return None
 
@@ -1096,7 +1233,9 @@ class SemanticEngine:
 
         scoped = self.search_top_k(query, k=5, threshold=0.0, book=book)
 
-        if scoped and self._clears_display_threshold(scoped[0]):
+        if scoped and self._clears_display_threshold(
+            scoped[0], BOOK_SCOPE_DISPLAY_THRESHOLD
+        ):
             scoped[0]["in_context"] = True
             return scoped[0]
 

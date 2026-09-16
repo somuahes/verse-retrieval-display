@@ -27,7 +27,7 @@ from app.retrieval.hybrid import (
 from app.ui import style_kit as sk
 
 
-CHAPTER_COLUMNS = 6
+CHAPTER_COLUMNS = 1
 
 
 class BrowserVerseRow(QFrame):
@@ -204,6 +204,19 @@ class BrowsePanel(QWidget):
             self._version = versions[0]
         self._ver_combo.blockSignals(False)
 
+    def set_version(self, version: str):
+        """External hook so the operator panel's manual/voice version
+        switch (which this panel has no other way of knowing about) keeps
+        Browse's own version combo in sync instead of it silently going
+        stale on whatever version it was opened with."""
+        if not version or version == self._version:
+            return
+        idx = self._ver_combo.findText(version, Qt.MatchFixedString)
+        if idx >= 0:
+            self._ver_combo.setCurrentIndex(idx)  # fires _on_version_changed
+        else:
+            self._on_version_changed(version)
+
     def _on_version_changed(self, version: str):
         if not version:
             return
@@ -238,7 +251,7 @@ class BrowsePanel(QWidget):
         count = db_chapter_count(self._version, self._book)
         for n in range(1, count + 1):
             btn = QPushButton(str(n))
-            btn.setFixedSize(40, 32)
+            btn.setFixedHeight(32)
             btn.setCheckable(True)
             btn.setStyleSheet(sk.btn_qss("nav"))
             btn.clicked.connect(lambda _, ch=n: self._on_chapter_selected(ch))

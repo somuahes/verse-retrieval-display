@@ -24,6 +24,7 @@ from PyQt5.QtWidgets import (
 from app.ui.theme_model import Theme
 from app.ui import theme_store
 from app.ui.display_window import DisplayWindow
+from app.ui import style_kit as sk
 
 
 SAMPLE_VERSE = {
@@ -40,7 +41,10 @@ class ThemeDesigner(QMainWindow):
     def __init__(self, active_theme_name: Optional[str] = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Theme Designer")
-        self.resize(1400, 860)
+        # Capped/centered to whatever screen this opens on -- see
+        # style_kit.fit_to_screen's docstring (same fix as the Operator
+        # Panel's own window sizing).
+        sk.fit_to_screen(self, 1400, 860)
 
         self._draft: Theme = Theme()
         self._saved: Theme = Theme()

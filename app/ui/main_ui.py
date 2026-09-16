@@ -601,8 +601,15 @@ class OperatorWindow(QMainWindow):
         # title text and overlapped button labels rather than erroring;
         # confirmed by measuring topbar.minimumSizeHint() directly, not
         # guessed). Revisit this number if more topbar buttons are added.
-        self.setMinimumSize(1680, 760)
-        self.resize(1750, 860)
+        #
+        # Both figures are capped to whatever screen this actually opens
+        # on (see fit_to_screen) — the ideal 1750x860 is tuned for a
+        # normal desktop monitor and previously opened partly off-screen,
+        # or forced a window bigger than the display, on a smaller
+        # laptop/projector screen. On a screen smaller than 1680x760 the
+        # topbar can still crowd (the clipping bug above), but that's
+        # preferable to the window not fitting on the screen at all.
+        style_kit.fit_to_screen(self, 1750, 860, min_w=1680, min_h=760)
 
         self._settings   = QSettings("BibleAI", "OperatorPanel")
         # Restricted to light mode only for now -- dark/system are off
@@ -1340,7 +1347,6 @@ class OperatorWindow(QMainWindow):
         row.setSpacing(6)
         for label, cmd, tip in [
             ("◀ Prev",    "PREV",   "Previous verse"),
-            ("↺ Repeat",  "REPEAT", "Repeat current verse"),
             ("Next ▶",    "NEXT",   "Next verse"),
             ("Last ↓",    "LAST",   "Last verse in chapter"),
         ]:
@@ -1791,6 +1797,13 @@ class OperatorWindow(QMainWindow):
                 f"color: {_t('green')}; font-size: 11px; "
                 f"background: transparent; border: none;")
             self._ver_status_lbl.setText(f"✓ {desc}")
+            # Keep Browse's own version combo in lockstep with whichever
+            # path changed the active version -- the manual dropdown here
+            # and voice-triggered "read in BBE" both land in this same
+            # callback, so this one hook covers both.
+            if self._browse_panel is not None:
+                active_version, _, _, _ = self._engine.position_snapshot()
+                self._browse_panel.set_version(active_version)
             return
         self._state_lbl.setText(f"State: {desc}")
 

@@ -299,7 +299,7 @@ defaults `create_transcriber("twi", ...)` to `backend="w2vbert"` (Khaya
 is still an unimplemented placeholder — pass `backend="khaya"`
 explicitly once it's filled in to go back to using it as the default).
 `main_ui.py` has its own "Language:" selector in the microphone card
-(English / Twi (offline · w2v-bert)), independent of the Bible version
+(English / Twi (offline)), independent of the Bible version
 dropdown — you can transcribe Twi while displaying KJV, or English while
 displaying TWI, etc. Whichever one is selected there is what Start
 Listening uses, locked in at that moment same as the mic device picker;

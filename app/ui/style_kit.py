@@ -159,3 +159,40 @@ def app_icon():
     setWindowIcon()."""
     from PyQt5.QtGui import QIcon
     return QIcon(app_icon_pixmap())
+
+
+def fit_to_screen(widget, ideal_w: int, ideal_h: int,
+                   min_w: int = None, min_h: int = None):
+    """Size and center a top-level window against whatever screen it's
+    actually opening on, instead of a fixed pixel size tuned for the
+    developer's own monitor -- on a smaller laptop/projector-connected
+    display a hardcoded 1750x860 (or similar) can open partly off-screen
+    or force scrollbars/clipping that never show up in normal testing.
+
+    Caps the initial size (and, if given, the resize-down floor) to the
+    screen's available geometry (excludes taskbar etc.), then centers the
+    window in whatever space that leaves. Falls back to the untouched
+    ideal/min sizes if no screen can be determined (e.g. offscreen QPA).
+    """
+    screen = widget.screen() if hasattr(widget, "screen") else None
+    if screen is None:
+        from PyQt5.QtWidgets import QApplication
+        screen = QApplication.primaryScreen()
+
+    if screen is None:
+        w, h = ideal_w, ideal_h
+        if min_w is not None and min_h is not None:
+            widget.setMinimumSize(min_w, min_h)
+        widget.resize(w, h)
+        return
+
+    avail = screen.availableGeometry()
+    w = min(ideal_w, avail.width())
+    h = min(ideal_h, avail.height())
+
+    if min_w is not None and min_h is not None:
+        widget.setMinimumSize(min(min_w, avail.width()), min(min_h, avail.height()))
+
+    widget.resize(w, h)
+    widget.move(avail.x() + (avail.width() - w) // 2,
+                avail.y() + (avail.height() - h) // 2)

@@ -2242,3 +2242,359 @@ today's session, this time on the right number.
   version would be the way to fold Twi cases into the formal harness
   later, if that harness's CSV-driven format (vs. this session's
   pytest-file approach) is ever specifically wanted.
+
+---
+
+## 29. Operator UI simplification/fix pass — Live Output/Queue removed, Go Live is now the only path live, Semantic Detections decoupled, and a mid-session concurrent-editing discovery
+
+A long, iterative operator-driven session (2026-09-15), almost entirely
+UI-layer, working from screenshots and live feedback rather than a single
+upfront spec. Summarized by theme rather than message-by-message.
+
+### Projector display: instant first verse, non-black default background
+
+`DisplayWindow.show_verse()` always ran a full fade-out (on nothing) then
+fade-in, even for the very first verse shown after opening the display or
+after a clear — a wasted `FADE_MS` (400ms) twice, reported as "projection
+delay." Fixed: a `first_appearance` check (`_current_verse is None`) skips
+straight to instant content on that first show; verse-to-verse changes
+still get the smooth cross-fade the feature was designed for.
+
+Separately, the default projector background turned out to be black by
+accident, not by design — `Theme`'s dataclass default and two of the three
+starter themes (`Classic Gold`, `Modern Minimal`) had `background_color`
+fields nobody had ever customized away from `#000000`/`#0D0F14`. Fixed
+both to real, non-black colors (`#14213D` oxford blue, `#1C2333` dark
+slate) in `theme_model.py` **and** the actual `themes/*.json` files
+already on disk (the model defaults alone don't affect a theme that
+already exists as a saved file). Caught via the operator's own saved
+`QSettings` value (`active_display_theme` = `"Modern Minimal"`, not the
+assumed default `"Classic Gold"`) after fixing only the latter didn't
+resolve the report — a reminder that a default only matters for someone
+who hasn't already picked something else.
+
+### Go Live is now the only path to the projector — and why that matters
+
+`_set_live()` used to silently no-op if the operator had never clicked
+"Open Display" — fixed to auto-open it (windowed) the first time
+something actually goes live, so Go Live/Push-to-Live can't silently
+drop a verse on the floor.
+
+The "Push to Live" button (an explicit one-off Preview→Live push,
+independent of the Go Live toggle) was removed twice this session, both
+times at explicit operator request, and both times its removal broke
+live display — reported as "the verse is not displaying on the mini
+projector." Root cause explained in full both times: Go Live defaults
+OFF (deliberately — nothing should reach the congregation without
+approval); toggling it ON doesn't just push once, it also switches to
+auto-pushing everything from then on, a bigger behavior change than a
+single push while staying in manual mode. Without a separate button,
+there is no way to get anything onto the projector at all while Go Live
+stays OFF. First time, this was restored. Second time, the operator
+reiterated the removal after hearing the tradeoff, so it was removed for
+good this pass — Go Live is now genuinely the only path, documented
+prominently in code comments/tooltips and flagged in
+`SYSTEM_DOCUMENTATION.md` §5 (item 10) specifically so a future demo
+walkthrough says this out loud before anyone reaches for ▶ expecting it
+alone to project something.
+
+The Fullscreen toggle (`DisplayWindow.enter_fullscreen()`/
+`exit_fullscreen()`, a topbar button) was removed the same pass, also by
+explicit request — the display now only ever opens windowed. The
+underlying `DisplayWindow` methods were left in place (unused, harmless)
+rather than deleted, in case the button comes back.
+
+### Manual version switch now redisplays immediately
+
+Reported: switching version via the UI's "Switch Version" button changed
+nothing about the verse already on screen — the version only took effect
+starting with whatever verse came *next*. Root cause: `HybridEngine.
+_switch_version()` deliberately never redisplays the current position by
+itself (by design, so a version cue spoken in the same breath as a
+reference doesn't flash the old verse first) — the voice path
+(`_run_fast`) always follows up with a separate `_redisplay_current_
+position()` call, but the UI's button only ever called the raw switch.
+Fixed by having the button call `_redisplay_current_position()` too after
+a successful switch, and by moving that method's lock acquisition inside
+itself (`with self._lock:`) since it's now called directly from the UI
+thread, not just from inside `process()`'s already-held lock — same
+reentrant-`RLock` pattern already used by `_navigate()`.
+
+### Split-utterance reference recombination widened, then lost to a concurrent commit
+
+Separately, in response to "speech is continuous, segmentation
+shouldn't be lost before it reaches the engine" (with the important
+caveat, once clarified, that segmentation *during* transcription was
+fine — the concern was only about what happens between transcription and
+`HybridEngine.process()`): reviewed `hybrid.py`'s module docstring, which
+documents that a fully continuous, persistent rolling-word-window design
+was already tried once and reverted after it caused silent wrong-verse
+matches (a stale word from an unrelated earlier utterance riding into a
+later one's score). The existing, narrower mitigation
+(`_short_trailing_fragment` — combines a short current fragment with just
+the *one* immediately-preceding utterance, only as a fallback, only when
+gated by the caller's own structural detector) only reached one utterance
+back, missing a 3-utterance split ("Leviticus" / "chapter" / "27").
+Widened to `_short_trailing_fragments()` (plural), trying candidates from
+one sentence of lookback up to `ROLLING_CONTEXT_SENTENCES` (3), narrowest
+first, each still independently gated by the same detector as before —
+bounded, not a reintroduction of the reverted design. Added
+`tests/test_multi_utterance_split_reference.py` covering the 3-utterance
+case. All tests passed at the time.
+
+This was subsequently **wiped from `hybrid.py` by a separate, concurrent
+commit** (`6c1b8ae`, "Add context-aware display decision layer" — see
+below) that landed on `main` mid-session, evidently based on an older
+copy of the file. Confirmed via `git diff`/timestamps, not assumed. The
+new regression test is still in the tree but currently **fails** (the
+widening it covers isn't present in `hybrid.py` as of this write-up) —
+left that way deliberately rather than reapplying it a third time, since
+`hybrid.py`/`_run_semantic` is exactly the file/area the concurrent
+commit was itself actively changing (it replaced the whole
+`context_decision.py`-based decision layer `_run_semantic` used to call
+with a simpler threshold-only version), and blindly reapplying risked a
+second collision. Open item — reapplying the widening (now against the
+post-`6c1b8ae` `_run_semantic`) is a clean, well-scoped, low-risk piece of
+follow-up work whenever someone confirms no one else is mid-edit there.
+
+### Discovery: another session was committing to this repo concurrently
+
+While investigating why several same-session fixes (Queue→Browse default
+panel, light-mode lock, button-height fixes, the screen-width clamp)
+appeared to have silently reverted, found a new commit, `6c1b8ae`, on
+`main` that hadn't been there at the start of the session — from a
+separate, concurrent Claude Code session or editor, not authored here.
+Confirmed via `git log`, not assumed: the previous known HEAD was
+`72af2a5`; `6c1b8ae` landed on top of it mid-session, and several files
+(`main_ui.py`, `hybrid.py`) had working-tree content matching a version
+of the file *older* than several already-applied edits, consistent with
+that other session's own working copy overwriting this session's
+uncommitted changes at commit time. Re-applied everything that had been
+lost (Queue→Browse swap, light-mode lock, button heights, the screen-
+width clamp) on top of the current file state rather than assuming the
+first pass was still there. Flagged to the operator directly rather than
+silently redoing work forever; the operator confirmed and the session
+continued. Also found, later in the session (while reviewing the diff
+before a `git push`), that `context_decision.py`/`tests/
+test_context_decision.py` carried further **uncommitted** changes from
+that same other source, partially reverting bug fixes `6c1b8ae` itself
+had added (the EMA-seeding fix, single-utterance evidence-weighting) —
+not authored here, deliberately excluded from this session's own commit
+pending the operator's review (see "Committed and pushed" below).
+
+**Practical lesson for future sessions on this repo**: don't assume the
+working tree only reflects what the current conversation did. If a fix
+that was verified working stops being visible, check `git log`/`git diff
+--stat` against the remembered HEAD before redoing it blindly — it may
+be a concurrent session's commit, not a bug in the fix itself.
+
+### Queue feature removed entirely
+
+Following "what is the queueing button there for again i dont need it":
+removed the whole feature, not just its previously-hidden panel (Queue's
+card had already been swapped out for Browse earlier this session, but
+the "+" buttons scattered across Detections/Search/Browse still fed it,
+invisibly). Removed: `QueueItem`, `_build_queue` and the whole
+save/load/reorder/add/remove/clear method cluster, every "+ Add to
+Queue" button and its `add_queue` signal (`DetectionCard`,
+`SearchResultItem`, `BrowserVerseRow`, `BrowsePanel`), the `queue_store`
+import and `PROGRAMS_DIR` constant, and the now-dead tests exercising all
+of it (8 cases in `tests/test_operator_integration.py`, 1 in
+`tests/test_browser_window.py`). Left `app/ui/queue_store.py` itself and
+its own standalone tests (`tests/test_queue_store.py`) alone — a
+self-contained, harmless, still-tested module now orphaned, not worth
+deleting a file over on top of everything else this pass touched.
+
+### Semantic Detections decoupled from AI Detections; top-3 candidates; full "heard" text
+
+Three related requests, handled together: (1) AI Detections and Semantic
+Detections used to show the *same* semantic hit twice — once in each
+panel, the latter just a `match_type=="semantic"` filter over the former
+— when the ask was for them to be genuinely separate; (2) only the single
+final pick reached the UI at all, when the ask was to see the top-3
+ranked candidates per utterance, for real accuracy evaluation; (3)
+detection cards truncated the "heard:" transcript text to 90 characters,
+also specifically an evaluation blocker.
+
+Fixed with one new data path rather than patching the existing one: added
+`HybridEngine.set_semantic_candidates_callback()`, firing
+`semantic.search_top_k(text, k=3)`'s raw top-3 for every utterance that
+reaches step 5 (semantic search) — independent of whatever `_run_semantic`
+itself goes on to decide about displaying. `_on_verse` no longer calls
+`_add_detection_card` for `match_type=="semantic"` verses at all (true
+decoupling, not a filter), and Semantic Detections is now driven entirely
+by the new channel — each utterance's top 3 render as separate
+`DetectionCard`s with a display-only `#1`/`#2`/`#3` rank prefix (added via
+a new `verse["_rank"]` field the card renders specially, never written
+into `verse["book"]` itself, so the card's own ▶ button still resolves a
+real, DB-lookupable reference). The 90-char truncation on "heard:" text
+was removed outright (the label already had `setWordWrap(True)`, so full
+text just wraps instead of needing truncation).
+
+Same pass, dropped two technical/model-name strings from operator-facing
+labels per "things that are too specific like model names... you can get
+rid of them" — `"Twi (offline · w2v-bert)"` → `"Twi (offline)"` and
+`"(Whisper output — raw speech)"` → `"(raw speech, unedited)"` — same
+meaning, no backend name exposed to someone who isn't a developer.
+
+### Layout fixes
+
+- **Button text clipping.** Several buttons ("Clear" ×3, "N new ▲"
+  badges, previously also "Load…"/"Save…" before Queue's removal) had
+  `setFixedHeight(24)`, later bumped to `26` — both clipped the button's
+  own text under `btn_qss()`'s padding on at least one real font/DPI
+  combination (confirmed via actual screen captures at each step, not
+  guessed — the app was launched with `QT_QPA_PLATFORM=windows` under a
+  real Qt session and grabbed with `.grab()` to inspect real rendering,
+  repeatedly, as each fix was verified). Any hardcoded pixel number was
+  going to be wrong somewhere; the actual fix was removing
+  `setFixedHeight` entirely so each button sizes itself from its own
+  `sizeHint()` (padding + whatever the font actually measures at,
+  wherever it's running) — categorically can't reclip regardless of
+  system font rendering, unlike a guessed constant.
+- **Right column dead space.** Preview/Navigation/Bible-Version/Search
+  used to stack with a trailing `addStretch()`, leaving a large blank
+  gap below Search on anything taller than the cards' natural combined
+  height. Fixed by giving Search a `stretch=1` layout weight so it
+  expands to fill the leftover space (its results list is the one
+  section here with genuinely variable-length content); a follow-up
+  request ("size of preview and search should be equal") gave Preview
+  the same `stretch=1` weight, so the two now always match in height,
+  with Navigation/Bible Version staying their natural compact size
+  between them. `_build_verse_card()` got a trailing `addStretch()` of
+  its own so its now-taller card keeps its content top-anchored rather
+  than the reference/text stretching to fill the space.
+- **Browse panel width vs. screen width.** Covered above under "Go Live
+  auto-opens" theme, but worth repeating here: opening Browse by default
+  requests `current width + Browse's own 650px`, which can exceed a
+  real screen's available width (confirmed: 1750+650=2400 requested on
+  the operator's actual 1920px-wide screen). Windows silently clamps the
+  window to fit — but *after* the splitter had already divided up the
+  wider, uncapped figure, squeezing every other panel (and clipping
+  Browse's own version-combo in the process). Fixed by capping the
+  resize request at `screen.availableGeometry().width()` before asking,
+  so the splitter divides up space it's actually going to get.
+
+### Committed and pushed
+
+All of the above (excluding `context_decision.py`/`test_context_decision.py`
+per the operator's explicit choice to leave that uncommitted pending
+separate review, and excluding the still-failing
+`test_multi_utterance_split_reference.py` per the open item above) was
+committed as `eb4d6f6` — "Simplify operator UI, decouple semantic review,
+fix projector/version-switch bugs" — and pushed to `origin/main` together
+with the already-local `6c1b8ae`. Full suite green before pushing: 52/52
+(`pytest tests --ignore=tests/test_multi_utterance_split_reference.py`).
+
+---
+
+## 30. Small operator-requested UI fixes: Repeat button, Browse version sync, vertical chapters, screen-aware window sizing
+
+A short follow-up session (2026-09-16), four independent, small operator
+requests handled in one pass. Each verified against the real running
+`OperatorWindow`/`BrowsePanel`/`ThemeDesigner` (built and driven through
+QTest/direct widget-state checks under Qt's offscreen platform, the same
+approach `conftest.py` already uses for the test suite — not just a
+read-through).
+
+### Repeat button removed
+
+"remove the repeat button im notusing it for anything" — removed the
+"↺ Repeat" button from the Navigation card
+(`main_ui.py::_build_nav_card`). Left the voice-triggered `REPEAT`/"read
+that again" command in `hybrid.py` untouched — a different feature, not
+mentioned in the request.
+
+### Browse panel version sync
+
+"make sure all version changes are synchronised from manual to browse
+scripture" — `BrowsePanel` (`browser_window.py`) had its own version
+combo, seeded once from `initial_version` when the panel was first
+constructed, with nothing keeping it in sync afterward. Switching version
+later (manual dropdown *or* voice — both funnel through
+`HybridEngine._switch_version()`) left Browse silently showing the old
+version's books/chapters/verses.
+
+Fixed with a new `BrowsePanel.set_version(version)`: updates the combo
+(via `setCurrentIndex`, which fires the existing `_on_version_changed`
+handler) if the version differs from what Browse currently has. Wired
+into `main_ui.py`'s `_on_engine_status()`, in the existing
+`state == "version_switch"` branch — already the single callback both the
+manual Switch-Version button and voice-triggered "read in BBE" land in
+(see §29's "Manual version switch now redisplays immediately"), so one
+hook covers both paths without needing to duplicate the sync call at each
+call site.
+
+Verified live: opened Browse (defaults to whatever version the engine is
+on), then switched the main dropdown from KJV to BBE and clicked Switch
+Version — Browse's own combo followed to BBE automatically.
+
+### Browse chapters arranged vertically
+
+"in browse let the chapeter be arranged vertically" — `browser_window.py`
+built its Chapters column as a 6-column grid (`CHAPTER_COLUMNS = 6`,
+`divmod(n - 1, CHAPTER_COLUMNS)`). Changed to `CHAPTER_COLUMNS = 1` (a
+single vertical column, matching the Books/Verses columns either side of
+it) and dropped the buttons' fixed 40px width (`setFixedSize(40, 32)` →
+`setFixedHeight(32)`) so they size naturally to the column's width instead
+of staying grid-cell-sized in a single-column layout. Verified live: a
+50-chapter book's buttons all landed in grid column 0.
+
+### Window sizing made screen-aware
+
+"on other desktop scrrens everything cant fit can you make the front end
+dynamic to adapt to other screen sizes" — root cause: `OperatorWindow`
+had `setMinimumSize(1680, 760)` / `resize(1750, 860)` hardcoded in
+`__init__` (see §29's own comment on where that 1680 figure came from —
+tuned to the topbar's `minimumSizeHint()` on the developer's own monitor).
+On a smaller screen (a common laptop panel, or a projector-connected
+display) the window either opened partly off-screen or couldn't be
+shrunk below a size the screen didn't have room for.
+
+Discussed two possible depths of fix with the operator before starting —
+(a) just cap the window to whatever screen it opens on, keeping the
+topbar exactly as-is (accepting some crowding on a genuinely narrow
+screen), vs. (b) additionally redesign the topbar itself to compact
+further (icon-only buttons, wrapping to two rows) so it could shrink well
+below 1680px cleanly. Operator chose (a) — the lighter fix, not touching
+the topbar's already-carefully-tuned layout (§29 documents the exact
+clipping/overlap bug that tuning fixed once already).
+
+Implemented as a new shared helper, `style_kit.fit_to_screen(widget,
+ideal_w, ideal_h, min_w=None, min_h=None)`: resolves the widget's actual
+screen (`widget.screen()`, falling back to
+`QApplication.primaryScreen()`), caps both the ideal size and the
+optional minimum-size floor to that screen's `availableGeometry()`, and
+centers the window in whatever space is left. `OperatorWindow` and
+`ThemeDesigner` (`theme_designer.py`, same class of hardcoded
+`resize(1400, 860)`) both switched to it.
+
+Verified against a simulated small screen rather than just read-through:
+launched the real `OperatorWindow`/`ThemeDesigner` classes under Qt's
+offscreen platform with its virtual screen forced to 800×600 (smaller
+than any real laptop panel — a deliberately harder case than the
+1366×768 this was actually reported against). Result:
+`OperatorWindow` now resizes/centers to exactly fill the 800×600 area,
+confirming the fix works. `ThemeDesigner` did **not** fully fit —
+it snapped back to ~1558px wide. Root cause: its layout
+(`_build_ui` → plain `QHBoxLayout`, no `QSplitter`) has a fixed 220px
+library sidebar plus a fixed 960×540 live-preview `QFrame`
+(`_build_preview`) with nothing flexible between them; Qt re-grows a
+shown window to its layout's real minimum size regardless of what it was
+`resize()`d to beforehand, so capping only the *initial* size can't
+override a structural minimum that large. `theme_designer.py`'s own
+docstring already flags this preview as "not a true dynamic canvas...
+deferred scope," so fixing it properly (making the preview itself
+resizable) was left as an open item rather than folded into this pass —
+flagged to the operator rather than silently left half-fixed.
+
+### Open items from this session
+
+- `ThemeDesigner`'s ~1550px structural width floor (fixed preview canvas
+  + fixed sidebar, no splitter) — needs the preview made genuinely
+  resizable to fit a small screen; deferred, operator aware.
+- Everything from §29 still pending (`context_decision.py`/
+  `tests/test_context_decision.py` uncommitted pending separate review;
+  `tests/test_multi_utterance_split_reference.py` still failing, not
+  reapplied against post-`6c1b8ae` `hybrid.py`) — untouched this session,
+  carried forward as-is.

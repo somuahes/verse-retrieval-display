@@ -56,6 +56,31 @@ See `PROGRESS.md` §27 for the full narrative, including one fix
 (a split-reference regression affecting bare "verse N" jumps) that
 hasn't yet been re-verified against the real `HybridEngine` end-to-end.
 
+**Addendum, 2026-09-15** (Operator UI only — ASR/retrieval sections below
+are unchanged from 2026-08-28/2026-09-14 and were not re-verified this
+pass, except one small `hybrid.py` addition noted where it applies): a
+long operator-driven UI simplification/fix pass — §2 and §3.4 rewritten
+below to match. Highlights: the redundant "Live Output" mirror panel
+removed (Preview already showed the same thing); the projector display
+now shows its first verse instantly instead of a wasted fade animation,
+and its default background is no longer flat black; Go Live now
+auto-opens the display if needed and is the *only* path to the projector
+(Fullscreen and the separate "Push to Live" button were both removed by
+explicit request, the latter twice — see `PROGRESS.md` §29 for why that
+one is worth reading before touching again); the Queue feature (ordered
+program lists) was removed entirely, replaced by Browse opened by
+default; the UI is locked to light mode only for now; Semantic Detections
+is now fully decoupled from AI Detections and shows the raw top-3 ranked
+semantic candidates per utterance (new `hybrid.py`
+`set_semantic_candidates_callback()`) instead of a filtered mirror of
+whatever got displayed. All verified against the real `OperatorWindow`
+(offscreen Qt, real fonts, real screen-resolution screenshots) and the
+full `pytest` suite, not just read from the diff. See `PROGRESS.md` §29
+for the full narrative, including a mid-session discovery that another,
+separate session was committing to this same repo concurrently (one
+commit, `6c1b8ae`, landed on `main` mid-pass) — worth knowing before
+assuming the working tree only reflects what any single session did.
+
 ---
 
 ## 1. What the system is
@@ -105,12 +130,16 @@ Microphone ──▶ BibleAITranscriber (Groq cloud primary, local fallback)
         SQLite bible.db  (verses, versions tables — KJV/BBE/TWI)
                         │
                         ▼
-      Operator UI (main_ui.py) — Preview / Queue / AI Detections
-        │  also opens: Browse (click Book→Chapter→Verse),
+      Operator UI (main_ui.py) — Preview / AI Detections / Semantic Detections
+        │  Browse (click Book→Chapter→Verse) opens by default in the
+        │  slot the removed Queue feature used to occupy; also opens
         │  Session History (verses actually pushed live), Theme Designer
-                        │  (operator clicks ▶ / Go Live)
+                        │  (operator clicks ▶, then Go Live — the ONLY
+                        │   path anything takes to reach the projector;
+                        │   auto-opens the display if it isn't already)
                         ▼
-        DisplayWindow (projector view, windowed by default, themeable)
+        DisplayWindow (projector view, windowed only, themeable —
+                        no Fullscreen toggle as of 2026-09-15)
 ```
 
 The sentence-transformer embedding model and FAISS indexes still load
@@ -299,49 +328,140 @@ revisited).
 
 ### 3.4 UI — `app/ui/main_ui.py` (canonical)
 
-Core layout/engine wiring unchanged from the prior session. The manual/
-unified search box (`_book_mode_lookup`) respects the same Twi language
-gating as the voice pipeline (§3.2) — typing a Twi book name while on an
-English version behaves the same as saying it would: it doesn't resolve,
-rather than silently displaying English text for a Twi-named reference.
+Engine wiring (§3.2 gating, priority order) unchanged. The manual/unified
+search box (`_book_mode_lookup`) respects the same Twi language gating as
+the voice pipeline — typing a Twi book name while on an English version
+behaves the same as saying it would: it doesn't resolve, rather than
+silently displaying English text for a Twi-named reference. The panel
+layout itself changed substantially on 2026-09-15 (below); Browse/History
+(added 2026-08-07) are otherwise unchanged in behavior.
 
-**Four features added 2026-08-07**, all UI-layer only — no change to
-`HybridEngine`'s matching/decision logic:
+**Preview / Live model, current as of 2026-09-15**: every verse lands in
+Preview first regardless of source (voice detection, ▶ on a
+Detections/Search/Browse row). **Go Live is the only path anything takes
+to reach the projector** — there is no separate one-off "push just this
+verse while staying in manual mode" control (a "Push to Live" button
+existed for exactly that and was removed twice by explicit operator
+request, despite the tradeoff — see `PROGRESS.md` §29). Turning Go Live
+ON immediately pushes whatever's currently in Preview and auto-opens the
+projector `DisplayWindow` if it isn't already open (previously this could
+silently no-op if the operator hadn't clicked "Open Display" first).
+Manually switching Bible version via the UI now redisplays the current
+verse/live position immediately too, matching the voice-triggered
+`process("read in BBE")` path (previously only the *next* detection
+picked up a manually-switched version).
 
-- **Queue reorder + save/load.** ▲/▼ per row reorders in place; Save…/
-  Load… persist the Queue as a JSON program-list file (default folder
-  `programs/`, mirroring `themes/`). Persistence logic lives in the new
-  `app/ui/queue_store.py`, not inline in the click handler — testable
-  without driving a real file-picker dialog.
-- **Save current slide as image.** `🖼 Save Image` on the Live Output card
-  grabs the projector window (`DisplayWindow.grab()`) to a PNG, named
-  after the reference by default.
-- **Session History window** (`app/ui/history_window.py`) — every verse
-  actually pushed live this run (distinct from AI Detections, which caps
-  at 30 and includes verses never sent live), with Refresh/Export
-  (JSON/CSV/TXT)/Clear.
-- **Browse window** (`app/ui/browser_window.py`) — click Book → Chapter →
-  Verse instead of typing a reference; a chapter-preview pane (all verses,
-  each individually sendable) closes the one interaction gap the unified
-  Search box didn't cover. Reads the database only through three new
-  `hybrid.py` functions — `db_list_books`, `db_chapter_count`,
-  `db_get_chapter` — added as thin, unindexed-logic query wrappers
-  alongside the existing `db_get_verse`/`db_get_next_verse`/etc.; nothing
-  in the matching/decision pipeline was touched.
+**Panels, current as of 2026-09-15**:
 
-**Visual identity**: `app/ui/style_kit.py` (new) — one shared dark/gold
-palette, QSS helpers, and a generated app icon, used by every secondary
-window (Browse, History) so the app has one consistent identity instead
-of each window styling itself independently. The Theme Designer is
-intentionally left on its own plain chrome (a properties-inspector-style
-tool, same precedent as before).
+- **AI Detections** — deterministic hits only (direct reference/
+  navigation/command). Semantic hits used to also appear here as a
+  secondary mirror; they no longer do (see below) — decoupled, not
+  filtered.
+- **Semantic Detections** — fully independent panel, populated by a new
+  dedicated channel (`hybrid.py`'s `set_semantic_candidates_callback()`,
+  firing `semantic.search_top_k()`'s raw top-3 per utterance that reaches
+  step 5) rather than a mirror of whatever `_run_semantic` decided to
+  display. Each utterance's top 3 ranked candidates render as separate
+  cards (`#1`/`#2`/`#3` prefix, display-only — never written into the
+  card's real `book` field, which its own ▶ still needs for a correct
+  DB lookup). Detection cards' "heard:" transcript text is shown in full
+  now, not truncated to 90 characters — added specifically so an operator
+  can evaluate match accuracy against the complete phrase that triggered
+  it, not a clipped preview.
+- **Browse** — unchanged in behavior, but now opens by default (in the
+  AUX slot the removed Queue feature used to occupy) instead of requiring
+  a manual click.
+- **Queue feature removed entirely** — the 2026-08-07 reorder/save-load
+  feature, its UI, `_add_to_queue`/etc. wiring, and its "+" buttons across
+  Detections/Search/Browse are gone, along with their tests.
+  `app/ui/queue_store.py` (the JSON program-list persistence module) still
+  exists on disk and still has its own passing tests, but nothing in the
+  UI calls it anymore.
+- **Save current slide as image** — moved from the removed Live Output
+  card onto the Preview card's own header (`🖼` icon button); behavior
+  (`DisplayWindow.grab()` to a PNG, named after the reference) unchanged.
+- **"Live Output" mirror panel removed** — it duplicated Preview once a
+  verse went live; Preview already shows every verse regardless of Live
+  state, so the mirror was redundant.
+- **Fullscreen toggle removed** — `DisplayWindow` now only ever opens
+  windowed (drag/resize onto the projector manually); its
+  `enter_fullscreen()`/`exit_fullscreen()`/`toggle_fullscreen()` methods
+  still exist on the class, just unused by the UI.
+- **Theme locked to light mode only, for now** — the topbar's dark/system
+  toggle buttons were removed (not just hidden); `style_kit.py`'s shared
+  secondary-window palette (Browse/History) was switched to match, since
+  it used to be hardcoded dark independent of the main window's own
+  toggle and stayed dark even after the main window went light.
+- **Projector display**: shows its first verse (after opening, or after a
+  clear) instantly — it used to run a full fade-out on nothing followed
+  by a fade-in, wasting `FADE_MS` (400ms) twice for no visible reason.
+  Default background changed from flat black to a themed color (Classic
+  Gold: oxford blue `#14213D`; Modern Minimal: dark slate `#1C2333`) —
+  both were black by accident (an unset/never-customized field), not
+  by design.
+- **Layout**: Preview and Search cards now share equal stretch height in
+  the right column (both have genuinely variable-length content); several
+  buttons (Clear ×3, "N new ▲" badges) had their height hardcoded to a
+  pixel value that clipped their own text under some font/DPI conditions
+  — fixed by removing the fixed height in favor of each button's natural
+  `sizeHint()`, which can't reclip regardless of the system's font
+  rendering. The Browse panel's first-open resize is capped to the
+  screen's actual available width, since asking for more (e.g. base
+  window width + Browse's own 650px) doesn't get a wider window, just an
+  OS-level clamp *after* the layout had already divided up the
+  uncapped, wider figure — silently squeezing every other panel below
+  its intended size.
 
-**Test coverage, new this session**: `tests/` (39 cases, 4 files) plus a
-root `conftest.py` — exercises the Queue/History/Browse/Save-Image
-features above against the real `HybridEngine` and real `bible.db`, not
-mocks. See `PROGRESS.md` §22 for the full run and a genuine bug the test
-suite surfaced along the way (a Windows DLL-load-order conflict between
-PyQt5 and torch when both are imported in one pytest process).
+**Visual identity**: `app/ui/style_kit.py` — one shared palette (light,
+see above), QSS helpers, and a generated app icon, used by every
+secondary window (Browse, History) except the Theme Designer
+(intentionally left on its own plain chrome, properties-inspector style).
+
+**2026-09-16 follow-up pass** (small, operator-requested fixes on top of
+2026-09-15's UI simplification above):
+
+- The Navigation card's "Repeat" button was removed — unused by the
+  operator. The underlying voice command (`REPEAT`/"read that again" in
+  `hybrid.py`) is a separate feature and was left alone.
+- **Browse version sync.** `BrowsePanel` had its own version combo, set
+  once from `initial_version` at panel-creation time with no way to learn
+  about a later switch — so switching the active Bible version (manual
+  dropdown or voice) after opening Browse left its combo silently stale.
+  Fixed with a new `BrowsePanel.set_version()`, called from
+  `_on_engine_status()`'s existing `"version_switch"` handler (already
+  the single callback both the manual and voice-triggered switch paths
+  land in), so Browse now always reflects whatever version is actually
+  active.
+- **Browse chapters are now a vertical list**, not a 6-column grid
+  (`CHAPTER_COLUMNS` in `browser_window.py`), matching the vertical
+  Books/Verses columns either side of it.
+- **Window sizing is now screen-aware.** `OperatorWindow` used a
+  hardcoded `setMinimumSize(1680, 760)` / `resize(1750, 860)` tuned for
+  one desktop monitor — reported as "everything can't fit" on a smaller
+  screen. New `style_kit.fit_to_screen(widget, ideal_w, ideal_h, min_w,
+  min_h)` caps both the initial size and the resize-down floor to the
+  actual screen's `availableGeometry()` and centers the window in
+  whatever space that leaves; `ThemeDesigner`'s `resize(1400, 860)` was
+  switched to the same helper. Verified by simulating an 800×600 screen
+  (Qt's offscreen platform) against the real `OperatorWindow`/
+  `ThemeDesigner` classes: `OperatorWindow` now fits exactly; `
+  ThemeDesigner` still snapped back to ~1558px wide because its layout
+  has a fixed 960×540 live-preview `QFrame` plus a fixed 220px sidebar
+  with no `QSplitter` between them — Qt grows a window back to its
+  layout's real minimum regardless of an earlier `resize()` call, so
+  capping the *initial* size alone can't fix a window whose content has
+  its own hard floor. Making that preview canvas itself resizable is a
+  larger, deliberately out-of-scope change (its own docstring already
+  flags the fixed-size preview as deferred).
+
+**Test coverage**: `tests/` (52 cases as of this session, excluding one
+new file deliberately not yet passing — see `PROGRESS.md` §29) plus a
+root `conftest.py`, exercising the panels/features above against the real
+`HybridEngine` and real `bible.db`, not mocks. A Windows DLL-load-order
+conflict between PyQt5 and torch (both bundle their own MSVC/OpenMP/MKL
+runtimes; whichever loads into the process first wins the search order)
+is why `conftest.py` forces import order explicitly — see its own
+comments, unchanged this session.
 
 ### 3.5 Evaluation — `app/evaluation/`
 
@@ -424,6 +544,27 @@ Twi), 1 upgraded from "not started" to "in progress" this session.**
    levels (peak 0.0033) — no usable signal yet. Likely a fader/routing
    issue on the mixer itself, not narrowed down further. See `PROGRESS.md`
    §25.
+10. **Go Live is now the only path to the projector, as of 2026-09-15** —
+    genuinely worth ranking near the top of "affects a live demo": there
+    is no one-off "push just this verse" control anymore (see §3.4),
+    only the Go Live toggle. An operator who leaves it OFF (the safe
+    default) and only clicks ▶ will see verses land in Preview and
+    nothing project — already confirmed as a real point of confusion
+    once mid-session (reported as "the verse is not displaying"). Not a
+    bug — a deliberate simplification made at the operator's explicit,
+    repeated request — but a demo walkthrough should say this out loud
+    before anyone reaches for ▶ expecting it alone to project something.
+
+11. **Theme Designer can still open larger than a small screen.** As of
+    2026-09-16, `OperatorWindow`'s sizing is screen-aware
+    (`style_kit.fit_to_screen()`, see §3.4), but `ThemeDesigner`'s fixed
+    960×540 preview canvas + fixed 220px sidebar give it a hard layout
+    minimum around 1550px wide that the same fix can't override — Qt
+    re-grows the window to that minimum once shown, regardless of the
+    size it was constructed with. Only affects the Theme Designer window,
+    not the main Operator Panel. Fix would mean making the preview canvas
+    itself resizable (currently deferred by design — see
+    `theme_designer.py`'s own docstring).
 
 `TRANSCRIPTION_SETUP.md`, flagged stale in the prior version of this
 document, was corrected this session (it now documents the real

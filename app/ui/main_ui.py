@@ -597,8 +597,8 @@ class OperatorWindow(QMainWindow):
         self.setWindowIcon(style_kit.app_icon())
         # Width floor matches the topbar's own measured minimumSizeHint
         # (1650px with all its current buttons — History/Browse pushed it
-        # past the old 1300/1440 figures, which silently clipped the
-        # title text and overlapped button labels rather than erroring;
+        # past the old 1300/1440 figures, which used to silently clip
+        # the title text and overlap button labels rather than error;
         # confirmed by measuring topbar.minimumSizeHint() directly, not
         # guessed). Revisit this number if more topbar buttons are added.
         #
@@ -606,9 +606,10 @@ class OperatorWindow(QMainWindow):
         # on (see fit_to_screen) — the ideal 1750x860 is tuned for a
         # normal desktop monitor and previously opened partly off-screen,
         # or forced a window bigger than the display, on a smaller
-        # laptop/projector screen. On a screen smaller than 1680x760 the
-        # topbar can still crowd (the clipping bug above), but that's
-        # preferable to the window not fitting on the screen at all.
+        # laptop/projector screen. Below ~1500px available width,
+        # _build_topbar() switches to a compacted layout (tighter
+        # margins/spacing/button padding, subtitle dropped) sized to
+        # actually fit rather than clip -- see that method.
         style_kit.fit_to_screen(self, 1750, 860, min_w=1680, min_h=760)
 
         self._settings   = QSettings("BibleAI", "OperatorPanel")
@@ -781,23 +782,57 @@ class OperatorWindow(QMainWindow):
 
     # ── Top bar ───────────────────────────────────────────
 
+    def _topbar_btn_qss(self, kind: str) -> str:
+        """btn_qss(), tightened for the topbar's own buttons on a narrow
+        screen (see _build_topbar). Used both when a topbar button is
+        first built and whenever its style is refreshed later (mode /
+        Go Live toggles), so the compact look survives past the first
+        click instead of reverting on the next setStyleSheet() call.
+        """
+        qss = btn_qss(kind)
+        if getattr(self, "_topbar_narrow", False):
+            qss += "QPushButton { padding: 4px 8px; font-size: 11px; }"
+        return qss
+
     def _build_topbar(self):
         bar = QWidget()
         bar.setFixedHeight(58)
         bar.setStyleSheet(
             f"background: {_t('panel')}; border-bottom: 1px solid {_t('border')};")
 
+        # Below ~1500px available width (e.g. a 1366x768 laptop panel)
+        # the full topbar -- title + subtitle + badge + six buttons --
+        # no longer fits even at OperatorWindow's 1680px min-width floor
+        # (see that comment in __init__), so it used to get silently
+        # clipped/overlapped by Qt rather than erroring. Compacting
+        # margins/spacing/padding and dropping the subtitle here instead
+        # keeps every control fully visible and readable on that size
+        # screen too.
+        screen = self.screen() if hasattr(self, "screen") else None
+        if screen is None:
+            from PyQt5.QtWidgets import QApplication
+            screen = QApplication.primaryScreen()
+        narrow = screen is not None and screen.availableGeometry().width() < 1500
+        # Persisted so _update_mode_btn()/_update_go_live_btn() (called
+        # again later on every mode/Go-Live toggle, long after this
+        # method returns) keep using the compact style instead of
+        # reverting to the full-size one on the next click.
+        self._topbar_narrow = narrow
+
         lay = QHBoxLayout(bar)
-        lay.setContentsMargins(20, 0, 20, 0)
-        lay.setSpacing(10)
+        lay.setContentsMargins(10, 0, 10, 0) if narrow else lay.setContentsMargins(20, 0, 20, 0)
+        lay.setSpacing(3 if narrow else 10)
 
         logo  = QLabel("✦")
         logo.setStyleSheet(
             f"color: {_t('gold')}; font-size: 22px;"
             f"background: transparent; border: none;")
-        title = QLabel("VERSE RETRIEVAL AND DISPLAY")
+        # Shortened on narrow screens (window title bar already reads
+        # "Bible AI - Operator Panel" in full) to leave room for the
+        # buttons, which is where an operator's eyes actually need to go.
+        title = QLabel("VERSE RETRIEVAL" if narrow else "VERSE RETRIEVAL AND DISPLAY")
         title.setStyleSheet(
-            f"color: {_t('text_p')}; font-size: 18px; font-weight: 700;"
+            f"color: {_t('text_p')}; font-size: {14 if narrow else 18}px; font-weight: 700;"
             f"background: transparent; border: none;")
         sub = QLabel("Sermon Intelligence")
         sub.setStyleSheet(
@@ -839,7 +874,7 @@ class OperatorWindow(QMainWindow):
         self._themes_btn = QPushButton("🎨 Themes…")
         self._themes_btn.setFixedHeight(32)
         self._themes_btn.setToolTip("Open the Theme Designer for the projector display")
-        self._themes_btn.setStyleSheet(btn_qss("ghost"))
+        self._themes_btn.setStyleSheet(self._topbar_btn_qss("ghost"))
         self._themes_btn.clicked.connect(self._open_theme_designer)
 
         self._history_btn = QPushButton("🕘 History")
@@ -847,7 +882,7 @@ class OperatorWindow(QMainWindow):
         self._history_btn.setToolTip(
             "Every verse actually pushed live this session — reviewable "
             "and exportable, unlike the capped AI Detections log")
-        self._history_btn.setStyleSheet(btn_qss("ghost"))
+        self._history_btn.setStyleSheet(self._topbar_btn_qss("ghost"))
         self._history_btn.clicked.connect(self._toggle_history)
 
         self._browser_btn = QPushButton("📖 Browse")
@@ -855,33 +890,36 @@ class OperatorWindow(QMainWindow):
         self._browser_btn.setToolTip(
             "Click Book → Chapter → Verse to find and preview scripture, "
             "as an alternative to typing into Search")
-        self._browser_btn.setStyleSheet(btn_qss("ghost"))
+        self._browser_btn.setStyleSheet(self._topbar_btn_qss("ghost"))
         self._browser_btn.clicked.connect(self._toggle_browse)
 
         self._btn_display = QPushButton("Open Display")
-        self._btn_display.setStyleSheet(btn_qss("primary"))
+        self._btn_display.setStyleSheet(self._topbar_btn_qss("primary"))
         self._btn_display.setToolTip(
             "Opens the projector window in windowed mode -- drag/resize "
             "it onto the actual projector screen like any other window.")
         self._btn_display.clicked.connect(self._toggle_display)
 
+        gap = 4 if narrow else 8
+
         lay.addWidget(logo)
         lay.addWidget(title)
-        lay.addSpacing(4)
-        lay.addWidget(sub)
+        if not narrow:
+            lay.addSpacing(4)
+            lay.addWidget(sub)
         lay.addStretch()
         lay.addWidget(self._badge)
-        lay.addSpacing(12)
+        lay.addSpacing(gap + 4)
         lay.addWidget(self._mode_btn)
-        lay.addSpacing(8)
+        lay.addSpacing(gap)
         lay.addWidget(self._go_live_btn)
-        lay.addSpacing(8)
+        lay.addSpacing(gap)
         lay.addWidget(self._themes_btn)
-        lay.addSpacing(8)
+        lay.addSpacing(gap)
         lay.addWidget(self._history_btn)
-        lay.addSpacing(8)
+        lay.addSpacing(gap)
         lay.addWidget(self._browser_btn)
-        lay.addSpacing(8)
+        lay.addSpacing(gap)
         lay.addWidget(self._btn_display)
 
         return bar
@@ -2074,12 +2112,17 @@ class OperatorWindow(QMainWindow):
     # ── Auto / Manual display mode ─────────────────────────
 
     def _update_mode_btn(self):
+        # "Mode: " prefix dropped on a narrow topbar (see _build_topbar)
+        # to save width -- unlike Go Live below, this toggle isn't the
+        # sole gate to the projector, so the icon alone plus tooltip is
+        # an acceptable tradeoff here.
+        narrow = getattr(self, "_topbar_narrow", False)
         if self._display_mode == "auto":
-            self._mode_btn.setText("⚡ Mode: Auto")
-            self._mode_btn.setStyleSheet(btn_qss("nav"))
+            self._mode_btn.setText("⚡ Auto" if narrow else "⚡ Mode: Auto")
+            self._mode_btn.setStyleSheet(self._topbar_btn_qss("nav"))
         else:
-            self._mode_btn.setText("🖐 Mode: Manual")
-            self._mode_btn.setStyleSheet(btn_qss("ghost"))
+            self._mode_btn.setText("🖐 Manual" if narrow else "🖐 Mode: Manual")
+            self._mode_btn.setStyleSheet(self._topbar_btn_qss("ghost"))
 
     def _toggle_display_mode(self):
         self._display_mode = "manual" if self._display_mode == "auto" else "auto"
@@ -2089,12 +2132,16 @@ class OperatorWindow(QMainWindow):
     # ── Preview / Live ─────────────────────────────────────
 
     def _update_go_live_btn(self):
+        # Text kept in full ("Go Live: ON/OFF") even on a narrow topbar,
+        # unlike the other buttons here -- this is the single control
+        # that gates the projector (see CLAUDE.md's Known constraints),
+        # so it should never read as a bare, ambiguous "ON"/"OFF".
         if self._go_live:
             self._go_live_btn.setText("● Go Live: ON")
-            self._go_live_btn.setStyleSheet(btn_qss("primary"))
+            self._go_live_btn.setStyleSheet(self._topbar_btn_qss("primary"))
         else:
             self._go_live_btn.setText("○ Go Live: OFF")
-            self._go_live_btn.setStyleSheet(btn_qss("ghost"))
+            self._go_live_btn.setStyleSheet(self._topbar_btn_qss("ghost"))
 
     def _toggle_go_live(self):
         self._go_live = not self._go_live
@@ -2172,6 +2219,7 @@ def main():
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    app.setWindowIcon(style_kit.app_icon())
     window = OperatorWindow(version=args.version.upper())
     window.show()
     sys.exit(app.exec_())

@@ -23,6 +23,11 @@ app/database/feedback.db
 # exact download/conversion steps needed after cloning.
 models/
 
+# PyInstaller build output (build_exe.spec) -- regenerate with
+# .\venv311\Scripts\pyinstaller.exe build_exe.spec --noconfirm
+build/
+dist/
+
 # Runtime logs
 *.log
 bible_ai.log
